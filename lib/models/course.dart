@@ -5,12 +5,18 @@ class Course {
   final String name;
   final double credits;
   final double gradePercent;
+  final String? institutionId;
+  final String? semesterId;
+  final bool includeInGpa;
 
   Course({
     required this.id,
     required this.name,
     required this.credits,
     required this.gradePercent,
+    this.institutionId,
+    this.semesterId,
+    this.includeInGpa = true,
   });
 
   String get letterGrade {
@@ -28,6 +34,7 @@ class Course {
     return 'F';
   }
 
+  // Standard 4.0-scale GPA points — used for cumulative GPA
   double get gpaPoints {
     if (gradePercent >= 93) return 4.0;
     if (gradePercent >= 90) return 3.7;
@@ -43,17 +50,30 @@ class Course {
     return 0.0;
   }
 
+  // GPA points scaled to the institution's GPA scale (e.g. 5.0)
+  double gpaPointsForScale(double scale) =>
+      gpaPoints * (scale / 4.0);
+
   Course copyWith({
     String? id,
     String? name,
     double? credits,
     double? gradePercent,
+    Object? institutionId = _sentinel,
+    Object? semesterId = _sentinel,
+    bool? includeInGpa,
   }) {
     return Course(
       id: id ?? this.id,
       name: name ?? this.name,
       credits: credits ?? this.credits,
       gradePercent: gradePercent ?? this.gradePercent,
+      institutionId: institutionId == _sentinel
+          ? this.institutionId
+          : institutionId as String?,
+      semesterId:
+          semesterId == _sentinel ? this.semesterId : semesterId as String?,
+      includeInGpa: includeInGpa ?? this.includeInGpa,
     );
   }
 
@@ -62,6 +82,9 @@ class Course {
         'name': name,
         'credits': credits,
         'gradePercent': gradePercent,
+        'institutionId': institutionId,
+        'semesterId': semesterId,
+        'includeInGpa': includeInGpa,
       };
 
   factory Course.fromJson(Map<String, dynamic> json) => Course(
@@ -69,6 +92,9 @@ class Course {
         name: json['name'] as String,
         credits: (json['credits'] as num).toDouble(),
         gradePercent: (json['gradePercent'] as num).toDouble(),
+        institutionId: json['institutionId'] as String?,
+        semesterId: json['semesterId'] as String?,
+        includeInGpa: (json['includeInGpa'] as bool?) ?? true,
       );
 
   static List<Course> listFromJson(String source) {
@@ -79,3 +105,6 @@ class Course {
   static String listToJson(List<Course> courses) =>
       jsonEncode(courses.map((c) => c.toJson()).toList());
 }
+
+// Sentinel for nullable copyWith fields
+const Object _sentinel = Object();
