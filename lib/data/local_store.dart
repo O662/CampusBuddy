@@ -16,8 +16,12 @@ class LocalStore {
 
   static const courses = 'courses';
   static const grades = 'grades';
+
+  /// Legacy box — assignments were merged into [tasks]. Still opened so the
+  /// one-time migration in [_migrateAssignmentsToTasks] can drain it.
   static const assignments = 'assignments';
   static const tasks = 'tasks';
+  static const folders = 'folders';
   static const blocks = 'blocks';
   static const events = 'events';
   static const decks = 'decks';
@@ -29,6 +33,7 @@ class LocalStore {
     grades,
     assignments,
     tasks,
+    folders,
     blocks,
     events,
     decks,
@@ -52,6 +57,7 @@ class LocalStore {
     }
     final store = LocalStore._();
     await store._seedIfFirstRun();
+    await store._migrateAssignmentsToTasks();
     return store;
   }
 
@@ -121,41 +127,62 @@ class LocalStore {
       await box(grades).put(g.id, g.toJson());
     }
 
-    final seedAssignments = [
-      Assignment(
-          id: newId(),
-          title: 'Problem Set 4',
-          courseId: cs.id,
-          dueDate: day(2),
-          estimatedMinutes: 120),
-      Assignment(
-          id: newId(),
-          title: 'Reading: Chapter 9',
-          courseId: hist.id,
-          dueDate: day(1),
-          estimatedMinutes: 45),
-      Assignment(
-          id: newId(),
-          title: 'Lab Report',
-          courseId: calc.id,
-          dueDate: day(4),
-          estimatedMinutes: 90),
-    ];
-    for (final a in seedAssignments) {
-      await box(assignments).put(a.id, a.toJson());
+    // Folders, two of them linked to a class so assignment tasks filed
+    // there route their grade automatically.
+    final csFolder =
+        TaskFolder(id: newId(), name: 'Algorithms', courseId: cs.id);
+    final histFolder =
+        TaskFolder(id: newId(), name: 'World History', courseId: hist.id);
+    final personalFolder =
+        TaskFolder(id: newId(), name: 'Personal', colorSeed: 4);
+    for (final f in [csFolder, histFolder, personalFolder]) {
+      await box(folders).put(f.id, f.toJson());
     }
 
+    // Assignments are now just tasks with `isAssignment: true`. Seeded ones
+    // intentionally skip placeholder grades so the seeded grade trend stays
+    // clean; editing one later creates its grade on demand.
     final seedTasks = [
+      TaskItem(
+          id: newId(),
+          title: 'Problem Set 4',
+          createdAt: now,
+          due: day(2),
+          priority: Priority.high,
+          folderId: csFolder.id,
+          isAssignment: true,
+          courseId: cs.id,
+          estimatedMinutes: 120),
+      TaskItem(
+          id: newId(),
+          title: 'Reading: Chapter 9',
+          createdAt: now,
+          due: day(1),
+          folderId: histFolder.id,
+          isAssignment: true,
+          courseId: hist.id,
+          estimatedMinutes: 45),
+      TaskItem(
+          id: newId(),
+          title: 'Lab Report',
+          createdAt: now,
+          due: day(4),
+          priority: Priority.high,
+          isAssignment: true,
+          courseId: calc.id,
+          estimatedMinutes: 90),
       TaskItem(
           id: newId(),
           title: 'Email professor about office hours',
           priority: Priority.medium,
           due: day(1),
+          folderId: personalFolder.id,
           createdAt: now),
       TaskItem(
           id: newId(),
           title: 'Buy a new notebook',
           priority: Priority.low,
+          folderId: personalFolder.id,
           createdAt: now),
     ];
     for (final t in seedTasks) {
@@ -215,5 +242,41 @@ class LocalStore {
     }
 
     await s.put('seeded', true);
+  }
+
+  /// One-time, idempotent: fold any rows left in the legacy `assignments`
+  /// box into the unified `tasks` box as assignment tasks, then drain it.
+  ///
+  /// Migrated tasks are flagged `isAssignment` and keep their course link,
+  /// but no placeholder grades are created here — that would spam Grades
+  /// with zeros for every old assignment. Editing one later creates its
+  /// grade on demand via [TaskNotifier].
+  Future<void> _migrateAssignmentsToTasks() async {
+    final s = box(settings);
+    if (s.get('assignmentsMerged') == true) return;
+
+    final legacy = box(assignments);
+    final tasksBox = box(tasks);
+    for (final raw in legacy.values.whereType<Map>().toList()) {
+      final dueMs = raw['dueDate'] as int?;
+      // Old status enum: 0=todo, 1=inProgress, 2=done.
+      final done = (raw['status'] as num?)?.toInt() == 2;
+      final task = TaskItem(
+        id: (raw['id'] as String?) ?? newId(),
+        title: (raw['title'] as String?) ?? 'Untitled',
+        done: done,
+        priority: Priority.medium,
+        due: dueMs == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(dueMs),
+        createdAt: DateTime.now(),
+        isAssignment: true,
+        courseId: raw['courseId'] as String?,
+        estimatedMinutes: (raw['estimatedMinutes'] as num?)?.toInt() ?? 60,
+      );
+      await tasksBox.put(task.id, task.toJson());
+    }
+    await legacy.clear();
+    await s.put('assignmentsMerged', true);
   }
 }

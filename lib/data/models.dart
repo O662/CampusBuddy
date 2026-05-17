@@ -21,16 +21,6 @@ extension PriorityX on Priority {
       };
 }
 
-enum AssignmentStatus { todo, inProgress, done }
-
-extension AssignmentStatusX on AssignmentStatus {
-  String get label => switch (this) {
-        AssignmentStatus.todo => 'To do',
-        AssignmentStatus.inProgress => 'In progress',
-        AssignmentStatus.done => 'Done',
-      };
-}
-
 enum EventType { classSession, exam, deadline, personal }
 
 extension EventTypeX on EventType {
@@ -97,7 +87,7 @@ class GradeEntry {
     required this.id,
     required this.courseId,
     required this.title,
-    required this.earned,
+    this.earned,
     required this.total,
     this.weight = 1,
     required this.date,
@@ -106,16 +96,25 @@ class GradeEntry {
   final String id;
   final String courseId;
   final String title;
-  final double earned;
+
+  /// Points earned, or null when the item exists but isn't graded yet
+  /// (e.g. an assignment task with no score entered). Ungraded entries
+  /// show as "—" and are excluded from any average.
+  final double? earned;
   final double total;
   final double weight;
   final DateTime date;
 
-  double get percent => total <= 0 ? 0 : (earned / total) * 100;
+  bool get isGraded => earned != null;
+
+  /// Percentage 0..100, or null while [isGraded] is false.
+  double? get percent =>
+      earned == null || total <= 0 ? null : (earned! / total) * 100;
 
   GradeEntry copyWith({
     String? title,
     double? earned,
+    bool clearEarned = false,
     double? total,
     double? weight,
     DateTime? date,
@@ -124,7 +123,7 @@ class GradeEntry {
         id: id,
         courseId: courseId,
         title: title ?? this.title,
-        earned: earned ?? this.earned,
+        earned: clearEarned ? null : (earned ?? this.earned),
         total: total ?? this.total,
         weight: weight ?? this.weight,
         date: date ?? this.date,
@@ -144,76 +143,65 @@ class GradeEntry {
         id: json['id'] as String,
         courseId: json['courseId'] as String,
         title: json['title'] as String,
-        earned: (json['earned'] as num).toDouble(),
+        earned: (json['earned'] as num?)?.toDouble(),
         total: (json['total'] as num).toDouble(),
         weight: (json['weight'] as num?)?.toDouble() ?? 1,
         date: DateTime.fromMillisecondsSinceEpoch(json['date'] as int),
       );
 }
 
-class Assignment {
-  const Assignment({
+/// A user-created folder that groups [TaskItem]s (e.g. by class or area of
+/// life). A folder can optionally be linked to a [Course]; when it is, any
+/// assignment task filed under it routes its grade to that course.
+class TaskFolder {
+  const TaskFolder({
     required this.id,
-    required this.title,
+    required this.name,
     this.courseId,
-    required this.dueDate,
-    this.estimatedMinutes = 60,
-    this.status = AssignmentStatus.todo,
-    this.notes = '',
+    this.colorSeed = 0,
   });
 
   final String id;
-  final String title;
+  final String name;
+
+  /// Optional [Course.id] this folder maps to. Null = not tied to a class.
   final String? courseId;
-  final DateTime dueDate;
-  final int estimatedMinutes;
-  final AssignmentStatus status;
-  final String notes;
+  final int colorSeed;
 
-  bool get isDone => status == AssignmentStatus.done;
+  Color get color => AppPalette.swatchFor(colorSeed);
 
-  Assignment copyWith({
-    String? title,
+  TaskFolder copyWith({
+    String? name,
     String? courseId,
     bool clearCourse = false,
-    DateTime? dueDate,
-    int? estimatedMinutes,
-    AssignmentStatus? status,
-    String? notes,
+    int? colorSeed,
   }) =>
-      Assignment(
+      TaskFolder(
         id: id,
-        title: title ?? this.title,
+        name: name ?? this.name,
         courseId: clearCourse ? null : (courseId ?? this.courseId),
-        dueDate: dueDate ?? this.dueDate,
-        estimatedMinutes: estimatedMinutes ?? this.estimatedMinutes,
-        status: status ?? this.status,
-        notes: notes ?? this.notes,
+        colorSeed: colorSeed ?? this.colorSeed,
       );
 
   Map<String, dynamic> toJson() => {
         'id': id,
-        'title': title,
+        'name': name,
         'courseId': courseId,
-        'dueDate': dueDate.millisecondsSinceEpoch,
-        'estimatedMinutes': estimatedMinutes,
-        'status': status.index,
-        'notes': notes,
+        'colorSeed': colorSeed,
       };
 
-  factory Assignment.fromJson(Map json) => Assignment(
+  factory TaskFolder.fromJson(Map json) => TaskFolder(
         id: json['id'] as String,
-        title: json['title'] as String,
+        name: json['name'] as String,
         courseId: json['courseId'] as String?,
-        dueDate: DateTime.fromMillisecondsSinceEpoch(json['dueDate'] as int),
-        estimatedMinutes: (json['estimatedMinutes'] as num?)?.toInt() ?? 60,
-        status: _enum(
-            AssignmentStatus.values, json['status'], AssignmentStatus.todo),
-        notes: json['notes'] as String? ?? '',
+        colorSeed: (json['colorSeed'] as num?)?.toInt() ?? 0,
       );
 }
 
-/// A general to-do (separate from coursework assignments).
+/// The single unit of "things to do". A plain task by default; flip
+/// [isAssignment] to mark it as coursework, which (when a class can be
+/// resolved from [courseId] or the folder's link) keeps a placeholder grade
+/// in sync under that course.
 class TaskItem {
   const TaskItem({
     required this.id,
@@ -222,6 +210,10 @@ class TaskItem {
     this.priority = Priority.medium,
     this.due,
     required this.createdAt,
+    this.folderId,
+    this.isAssignment = false,
+    this.courseId,
+    this.estimatedMinutes = 60,
   });
 
   final String id;
@@ -231,12 +223,31 @@ class TaskItem {
   final DateTime? due;
   final DateTime createdAt;
 
+  /// Optional [TaskFolder.id] this task is filed under. Null = unfiled.
+  final String? folderId;
+
+  /// When true this task represents graded coursework.
+  final bool isAssignment;
+
+  /// Explicit [Course.id] for the grade link. Falls back to the folder's
+  /// linked course when null (resolved in state, not here).
+  final String? courseId;
+
+  /// Rough effort estimate — drives the default block length on the planner.
+  final int estimatedMinutes;
+
   TaskItem copyWith({
     String? title,
     bool? done,
     Priority? priority,
     DateTime? due,
     bool clearDue = false,
+    String? folderId,
+    bool clearFolder = false,
+    bool? isAssignment,
+    String? courseId,
+    bool clearCourse = false,
+    int? estimatedMinutes,
   }) =>
       TaskItem(
         id: id,
@@ -245,6 +256,10 @@ class TaskItem {
         priority: priority ?? this.priority,
         due: clearDue ? null : (due ?? this.due),
         createdAt: createdAt,
+        folderId: clearFolder ? null : (folderId ?? this.folderId),
+        isAssignment: isAssignment ?? this.isAssignment,
+        courseId: clearCourse ? null : (courseId ?? this.courseId),
+        estimatedMinutes: estimatedMinutes ?? this.estimatedMinutes,
       );
 
   Map<String, dynamic> toJson() => {
@@ -254,6 +269,10 @@ class TaskItem {
         'priority': priority.index,
         'due': due?.millisecondsSinceEpoch,
         'createdAt': createdAt.millisecondsSinceEpoch,
+        'folderId': folderId,
+        'isAssignment': isAssignment,
+        'courseId': courseId,
+        'estimatedMinutes': estimatedMinutes,
       };
 
   factory TaskItem.fromJson(Map json) => TaskItem(
@@ -266,16 +285,20 @@ class TaskItem {
             : DateTime.fromMillisecondsSinceEpoch(json['due'] as int),
         createdAt:
             DateTime.fromMillisecondsSinceEpoch(json['createdAt'] as int),
+        folderId: json['folderId'] as String?,
+        isAssignment: json['isAssignment'] as bool? ?? false,
+        courseId: json['courseId'] as String?,
+        estimatedMinutes: (json['estimatedMinutes'] as num?)?.toInt() ?? 60,
       );
 }
 
-/// A scheduled block of time on the planner. Created by dragging an
-/// assignment onto a day, then resized/moved along the day.
+/// A scheduled block of time on the planner. Created by dragging a to-do
+/// onto a day, then resized/moved along the day.
 class TimeBlock {
   const TimeBlock({
     required this.id,
     required this.title,
-    this.assignmentId,
+    this.taskId,
     required this.day,
     required this.startMinute,
     required this.endMinute,
@@ -284,7 +307,9 @@ class TimeBlock {
 
   final String id;
   final String title;
-  final String? assignmentId;
+
+  /// The [TaskItem.id] this block was scheduled from, if any.
+  final String? taskId;
 
   /// Midnight of the day this block lives on.
   final DateTime day;
@@ -306,7 +331,7 @@ class TimeBlock {
       TimeBlock(
         id: id,
         title: title ?? this.title,
-        assignmentId: assignmentId,
+        taskId: taskId,
         day: day ?? this.day,
         startMinute: startMinute ?? this.startMinute,
         endMinute: endMinute ?? this.endMinute,
@@ -316,7 +341,7 @@ class TimeBlock {
   Map<String, dynamic> toJson() => {
         'id': id,
         'title': title,
-        'assignmentId': assignmentId,
+        'taskId': taskId,
         'day': day.millisecondsSinceEpoch,
         'startMinute': startMinute,
         'endMinute': endMinute,
@@ -326,7 +351,9 @@ class TimeBlock {
   factory TimeBlock.fromJson(Map json) => TimeBlock(
         id: json['id'] as String,
         title: json['title'] as String,
-        assignmentId: json['assignmentId'] as String?,
+        // Read the legacy `assignmentId` key for blocks created before
+        // assignments were merged into to-dos.
+        taskId: (json['taskId'] ?? json['assignmentId']) as String?,
         day: DateTime.fromMillisecondsSinceEpoch(json['day'] as int),
         startMinute: (json['startMinute'] as num).toInt(),
         endMinute: (json['endMinute'] as num).toInt(),

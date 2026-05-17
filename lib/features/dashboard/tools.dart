@@ -228,15 +228,16 @@ class TwoWeekOverviewCard extends ConsumerWidget {
     final windowEnd = start.add(const Duration(days: 14));
 
     final events = ref.watch(eventsProvider);
-    final assignments = ref.watch(assignmentsProvider);
+    final dueTasks = ref
+        .watch(tasksProvider)
+        .where((t) => !t.done && t.due != null)
+        .toList();
 
     bool sameDay(DateTime a, DateTime b) =>
         a.year == b.year && a.month == b.month && a.day == b.day;
     int countOn(DateTime d) =>
         events.where((e) => sameDay(e.start, d)).length +
-        assignments
-            .where((a) => !a.isDone && sameDay(a.dueDate, d))
-            .length;
+        dueTasks.where((t) => sameDay(t.due!, d)).length;
 
     // Agenda: upcoming items inside the window, soonest first.
     final agenda = <({DateTime when, String title, String tag, Color color})>[
@@ -248,14 +249,12 @@ class TwoWeekOverviewCard extends ConsumerWidget {
             tag: e.type.label,
             color: AppPalette.mint
           ),
-      for (final a in assignments)
-        if (!a.isDone &&
-            !a.dueDate.isBefore(today) &&
-            a.dueDate.isBefore(windowEnd))
+      for (final t in dueTasks)
+        if (!t.due!.isBefore(today) && t.due!.isBefore(windowEnd))
           (
-            when: a.dueDate,
-            title: a.title,
-            tag: 'Due',
+            when: t.due!,
+            title: t.title,
+            tag: t.isAssignment ? 'Assignment' : 'Due',
             color: AppPalette.peach
           ),
     ]..sort((x, y) => x.when.compareTo(y.when));

@@ -36,136 +36,140 @@ Future<DateTime?> _pickDate(BuildContext context, DateTime initial) {
   );
 }
 
-Future<Assignment?> showAssignmentDialog(
+Future<TaskItem?> showTaskDialog(
   BuildContext context, {
-  Assignment? existing,
+  TaskItem? existing,
+  required List<TaskFolder> folders,
   required List<Course> courses,
-  DateTime? presetDate,
+  String? presetFolderId,
 }) async {
   final titleC = TextEditingController(text: existing?.title ?? '');
-  final notesC = TextEditingController(text: existing?.notes ?? '');
   final estC = TextEditingController(
       text: (existing?.estimatedMinutes ?? 60).toString());
-  var due = existing?.dueDate ?? presetDate ?? DateTime.now();
-  String? courseId = existing?.courseId;
-
-  return showGlassDialog<Assignment>(
-    context,
-    title: existing == null ? 'New assignment' : 'Edit assignment',
-    content: StatefulBuilder(
-      builder: (context, setState) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _field(titleC, 'Assignment title'),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String?>(
-            initialValue: courseId,
-            isExpanded: true,
-            dropdownColor: const Color(0xFF241F45),
-            decoration: const InputDecoration(hintText: 'Course (optional)'),
-            items: [
-              const DropdownMenuItem(value: null, child: Text('No course')),
-              for (final c in courses)
-                DropdownMenuItem(value: c.id, child: Text(c.name)),
-            ],
-            onChanged: (v) => setState(() => courseId = v),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () async {
-                    final picked = await _pickDate(context, due);
-                    if (picked != null) setState(() => due = picked);
-                  },
-                  icon: const Icon(Icons.event, size: 18),
-                  label: Text('Due ${relativeDay(due)}'),
-                ),
-              ),
-              const SizedBox(width: 10),
-              SizedBox(
-                width: 110,
-                child: _field(estC, 'Est. min',
-                    keyboard: TextInputType.number),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          _field(notesC, 'Notes (optional)', maxLines: 3),
-        ],
-      ),
-    ),
-    actions: (context) => [
-      TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel')),
-      FilledButton(
-        onPressed: () {
-          if (titleC.text.trim().isEmpty) return;
-          final base = existing ??
-              Assignment(id: newId(), title: '', dueDate: due);
-          Navigator.pop(
-            context,
-            base.copyWith(
-              title: titleC.text.trim(),
-              courseId: courseId,
-              clearCourse: courseId == null,
-              dueDate: due,
-              estimatedMinutes: int.tryParse(estC.text) ?? 60,
-              notes: notesC.text.trim(),
-            ),
-          );
-        },
-        child: const Text('Save'),
-      ),
-    ],
-  );
-}
-
-Future<TaskItem?> showTaskDialog(BuildContext context,
-    {TaskItem? existing}) async {
-  final titleC = TextEditingController(text: existing?.title ?? '');
   var priority = existing?.priority ?? Priority.medium;
   DateTime? due = existing?.due;
+  String? folderId = existing?.folderId ?? presetFolderId;
+  var isAssignment = existing?.isAssignment ?? false;
+  String? courseId = existing?.courseId;
+
+  String? folderCourseId(String? fid) {
+    if (fid == null) return null;
+    for (final f in folders) {
+      if (f.id == fid) return f.courseId;
+    }
+    return null;
+  }
 
   return showGlassDialog<TaskItem>(
     context,
     title: existing == null ? 'New task' : 'Edit task',
     content: StatefulBuilder(
-      builder: (context, setState) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _field(titleC, 'What needs doing?'),
-          const SizedBox(height: 14),
-          Row(
-            children: [
-              for (final p in Priority.values)
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: ChoiceChip(
-                      label: Text(p.label),
-                      selected: priority == p,
-                      selectedColor: p.color.withValues(alpha: 0.3),
-                      onSelected: (_) => setState(() => priority = p),
+      builder: (context, setState) {
+        final inherited = folderCourseId(folderId);
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _field(titleC, 'What needs doing?'),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                for (final p in Priority.values)
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: ChoiceChip(
+                        label: Text(p.label),
+                        selected: priority == p,
+                        selectedColor: p.color.withValues(alpha: 0.3),
+                        onSelected: (_) => setState(() => priority = p),
+                      ),
                     ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String?>(
+              initialValue: folderId,
+              isExpanded: true,
+              dropdownColor: const Color(0xFF241F45),
+              decoration: const InputDecoration(hintText: 'Folder'),
+              items: [
+                const DropdownMenuItem(
+                    value: null, child: Text('No folder')),
+                for (final f in folders)
+                  DropdownMenuItem(value: f.id, child: Text(f.name)),
+              ],
+              onChanged: (v) => setState(() => folderId = v),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () async {
+                      final picked = await _pickDate(
+                          context, due ?? DateTime.now());
+                      if (picked != null) setState(() => due = picked);
+                    },
+                    icon: const Icon(Icons.event, size: 18),
+                    label: Text(due == null
+                        ? 'No due date'
+                        : 'Due ${relativeDay(due!)}'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                SizedBox(
+                  width: 96,
+                  child: _field(estC, 'Est. min',
+                      keyboard: TextInputType.number),
+                ),
+              ],
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: const Text('This is an assignment'),
+              subtitle: const Text(
+                'Tracks a placeholder grade under its class',
+                style: TextStyle(fontSize: 11),
+              ),
+              value: isAssignment,
+              activeThumbColor: AppPalette.accent,
+              onChanged: (v) => setState(() => isAssignment = v),
+            ),
+            if (isAssignment) ...[
+              const SizedBox(height: 4),
+              DropdownButtonFormField<String?>(
+                initialValue: courseId,
+                isExpanded: true,
+                dropdownColor: const Color(0xFF241F45),
+                decoration: const InputDecoration(hintText: 'Class'),
+                items: [
+                  DropdownMenuItem(
+                    value: null,
+                    child: Text(inherited == null
+                        ? 'No class'
+                        : "Use folder's class"),
+                  ),
+                  for (final c in courses)
+                    DropdownMenuItem(value: c.id, child: Text(c.name)),
+                ],
+                onChanged: (v) => setState(() => courseId = v),
+              ),
+              if (inherited == null && courseId == null)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Text(
+                    'Pick a class (or link the folder to one) so the '
+                    'grade has a home.',
+                    style: TextStyle(
+                        fontSize: 11, color: AppPalette.textSecondary),
                   ),
                 ),
             ],
-          ),
-          const SizedBox(height: 12),
-          OutlinedButton.icon(
-            onPressed: () async {
-              final picked =
-                  await _pickDate(context, due ?? DateTime.now());
-              if (picked != null) setState(() => due = picked);
-            },
-            icon: const Icon(Icons.event, size: 18),
-            label: Text(due == null ? 'No due date' : 'Due ${relativeDay(due!)}'),
-          ),
-        ],
-      ),
+          ],
+        );
+      },
     ),
     actions: (context) => [
       TextButton(
@@ -176,16 +180,102 @@ Future<TaskItem?> showTaskDialog(BuildContext context,
           if (titleC.text.trim().isEmpty) return;
           final base = existing ??
               TaskItem(
-                  id: newId(),
-                  title: '',
-                  createdAt: DateTime.now());
+                  id: newId(), title: '', createdAt: DateTime.now());
           Navigator.pop(
             context,
             base.copyWith(
-                title: titleC.text.trim(),
-                priority: priority,
-                due: due,
-                clearDue: due == null),
+              title: titleC.text.trim(),
+              priority: priority,
+              due: due,
+              clearDue: due == null,
+              folderId: folderId,
+              clearFolder: folderId == null,
+              isAssignment: isAssignment,
+              courseId: courseId,
+              clearCourse: courseId == null,
+              estimatedMinutes: int.tryParse(estC.text) ?? 60,
+            ),
+          );
+        },
+        child: const Text('Save'),
+      ),
+    ],
+  );
+}
+
+Future<TaskFolder?> showFolderDialog(
+  BuildContext context, {
+  TaskFolder? existing,
+  required List<Course> courses,
+}) async {
+  final nameC = TextEditingController(text: existing?.name ?? '');
+  var seed = existing?.colorSeed ?? 0;
+  String? courseId = existing?.courseId;
+  return showGlassDialog<TaskFolder>(
+    context,
+    title: existing == null ? 'New folder' : 'Edit folder',
+    content: StatefulBuilder(
+      builder: (context, setState) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _field(nameC, 'Folder name'),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<String?>(
+            initialValue: courseId,
+            isExpanded: true,
+            dropdownColor: const Color(0xFF241F45),
+            decoration: const InputDecoration(
+                hintText: 'Link to a class (optional)'),
+            items: [
+              const DropdownMenuItem(value: null, child: Text('No class')),
+              for (final c in courses)
+                DropdownMenuItem(value: c.id, child: Text(c.name)),
+            ],
+            onChanged: (v) => setState(() => courseId = v),
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 10,
+            children: [
+              for (var i = 0; i < AppPalette.categorySwatches.length; i++)
+                GestureDetector(
+                  onTap: () => setState(() => seed = i),
+                  child: Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: AppPalette.categorySwatches[i],
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: seed == i
+                            ? Colors.white
+                            : Colors.transparent,
+                        width: 2.5,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    ),
+    actions: (context) => [
+      TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel')),
+      FilledButton(
+        onPressed: () {
+          if (nameC.text.trim().isEmpty) return;
+          final base = existing ?? TaskFolder(id: newId(), name: '');
+          Navigator.pop(
+            context,
+            base.copyWith(
+              name: nameC.text.trim(),
+              colorSeed: seed,
+              courseId: courseId,
+              clearCourse: courseId == null,
+            ),
           );
         },
         child: const Text('Save'),
@@ -257,7 +347,7 @@ Future<GradeEntry?> showGradeDialog(
 }) async {
   final titleC = TextEditingController(text: existing?.title ?? '');
   final earnedC =
-      TextEditingController(text: existing?.earned.toString() ?? '');
+      TextEditingController(text: existing?.earned?.toString() ?? '');
   final totalC =
       TextEditingController(text: existing?.total.toString() ?? '100');
   final weightC =
@@ -300,6 +390,12 @@ Future<GradeEntry?> showGradeDialog(
                       keyboard: TextInputType.number)),
             ],
           ),
+          const SizedBox(height: 8),
+          const Text(
+            'Leave “Earned” blank to log it as not graded yet — it shows '
+            'as “—” and stays out of the average until you add a score.',
+            style: TextStyle(fontSize: 11, color: AppPalette.textSecondary),
+          ),
         ],
       ),
     ),
@@ -316,7 +412,9 @@ Future<GradeEntry?> showGradeDialog(
               id: existing?.id ?? newId(),
               courseId: courseId!,
               title: titleC.text.trim(),
-              earned: double.tryParse(earnedC.text) ?? 0,
+              earned: earnedC.text.trim().isEmpty
+                  ? null
+                  : (double.tryParse(earnedC.text) ?? 0),
               total: double.tryParse(totalC.text) ?? 100,
               weight: double.tryParse(weightC.text) ?? 1,
               date: existing?.date ?? DateTime.now(),

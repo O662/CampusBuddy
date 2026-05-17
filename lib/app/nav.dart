@@ -27,6 +27,7 @@ const secondaryNav = <NavItem>[
 const profileNav = NavItem('/profile', 'Profile', Icons.person_rounded);
 
 String titleForRoute(String location) {
+  if (location.startsWith('/customize')) return 'Customize dashboard';
   for (final n in [...primaryNav, ...secondaryNav, profileNav]) {
     if (location.startsWith(n.route)) {
       return n.route == '/profile' ? 'Profile & Settings' : n.label;

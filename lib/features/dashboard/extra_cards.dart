@@ -505,41 +505,34 @@ class QuickAddCard extends ConsumerWidget {
     return GlassCard(
       title: 'Quick add',
       icon: Icons.bolt_rounded,
-      child: Column(
+      child: Row(
         children: [
-          Row(
-            children: [
-              tile(Icons.check_circle_outline, 'Task',
-                  AppPalette.periwinkle, () async {
-                final t = await showTaskDialog(context);
-                if (t != null) ref.read(tasksProvider.notifier).upsert(t);
-              }),
-              tile(Icons.assignment_outlined, 'Assignment',
-                  AppPalette.peach, () async {
-                final a = await showAssignmentDialog(context,
-                    courses: ref.read(coursesProvider));
-                if (a != null) {
-                  ref.read(assignmentsProvider.notifier).upsert(a);
-                }
-              }),
-            ],
-          ),
-          Row(
-            children: [
-              tile(Icons.event_outlined, 'Event', AppPalette.mint,
-                  () async {
-                final e = await showEventDialog(context);
-                if (e != null) ref.read(eventsProvider.notifier).upsert(e);
-              }),
-              tile(Icons.school_outlined, 'Course', AppPalette.lavender,
-                  () async {
-                final c = await showCourseDialog(context);
-                if (c != null) {
-                  ref.read(coursesProvider.notifier).upsert(c);
-                }
-              }),
-            ],
-          ),
+          tile(Icons.check_circle_outline, 'Task', AppPalette.periwinkle,
+              () async {
+            final t = await showTaskDialog(context,
+                folders: ref.read(foldersProvider),
+                courses: ref.read(coursesProvider));
+            if (t != null) ref.read(tasksProvider.notifier).save(t);
+          }),
+          tile(Icons.create_new_folder_outlined, 'Folder',
+              AppPalette.peach, () async {
+            final f = await showFolderDialog(context,
+                courses: ref.read(coursesProvider));
+            if (f != null) {
+              ref.read(foldersProvider.notifier).upsert(f);
+            }
+          }),
+          tile(Icons.event_outlined, 'Event', AppPalette.mint, () async {
+            final e = await showEventDialog(context);
+            if (e != null) ref.read(eventsProvider.notifier).upsert(e);
+          }),
+          tile(Icons.school_outlined, 'Course', AppPalette.lavender,
+              () async {
+            final c = await showCourseDialog(context);
+            if (c != null) {
+              ref.read(coursesProvider.notifier).upsert(c);
+            }
+          }),
         ],
       ),
     );
@@ -598,9 +591,10 @@ class _CountdownCardState extends ConsumerState<CountdownCard> {
     for (final e in ref.watch(eventsProvider)) {
       consider(e.start, e.title, e.type.label, AppPalette.mint);
     }
-    for (final a in ref.watch(assignmentsProvider)) {
-      if (!a.isDone) {
-        consider(a.dueDate, a.title, 'Due', AppPalette.peach);
+    for (final t in ref.watch(tasksProvider)) {
+      if (!t.done && t.due != null) {
+        consider(t.due!, t.title,
+            t.isAssignment ? 'Assignment' : 'Due', AppPalette.peach);
       }
     }
 

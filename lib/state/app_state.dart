@@ -69,15 +69,15 @@ class GradeNotifier extends CollectionNotifier<GradeEntry> {
   GradeEntry decode(Map j) => GradeEntry.fromJson(j);
 }
 
-class AssignmentNotifier extends CollectionNotifier<Assignment> {
+class FolderNotifier extends CollectionNotifier<TaskFolder> {
   @override
-  String get boxName => LocalStore.assignments;
+  String get boxName => LocalStore.folders;
   @override
-  String idOf(Assignment i) => i.id;
+  String idOf(TaskFolder i) => i.id;
   @override
-  Map<String, dynamic> encode(Assignment i) => i.toJson();
+  Map<String, dynamic> encode(TaskFolder i) => i.toJson();
   @override
-  Assignment decode(Map j) => Assignment.fromJson(j);
+  TaskFolder decode(Map j) => TaskFolder.fromJson(j);
 }
 
 class TaskNotifier extends CollectionNotifier<TaskItem> {
@@ -89,6 +89,78 @@ class TaskNotifier extends CollectionNotifier<TaskItem> {
   Map<String, dynamic> encode(TaskItem i) => i.toJson();
   @override
   TaskItem decode(Map j) => TaskItem.fromJson(j);
+
+  /// Stable id for the grade entry mirrored from an assignment task.
+  String _gradeId(String taskId) => 'task-$taskId';
+
+  TaskItem? _byId(String id) {
+    for (final t in state) {
+      if (t.id == id) return t;
+    }
+    return null;
+  }
+
+  GradeEntry? _linkedGrade(String taskId) {
+    final id = _gradeId(taskId);
+    for (final g in ref.read(gradesProvider)) {
+      if (g.id == id) return g;
+    }
+    return null;
+  }
+
+  /// Course for an assignment task: an explicit [TaskItem.courseId] wins,
+  /// otherwise the linked course of its folder, otherwise none.
+  String? _resolveCourseId(TaskItem t) {
+    if (t.courseId != null) return t.courseId;
+    if (t.folderId == null) return null;
+    for (final f in ref.read(foldersProvider)) {
+      if (f.id == t.folderId) return f.courseId;
+    }
+    return null;
+  }
+
+  /// Persist a task and keep its placeholder grade in sync. Use this from
+  /// the UI instead of [upsert] so the assignment↔grade link is maintained.
+  Future<void> save(TaskItem task) async {
+    await upsert(task);
+    await _syncGrade(task);
+  }
+
+  /// Remove a task; drop its placeholder grade only when still ungraded
+  /// (a real recorded score is kept as standalone academic history).
+  Future<void> delete(String id) async {
+    final task = _byId(id);
+    await remove(id);
+    if (task == null) return;
+    final g = _linkedGrade(id);
+    if (g != null && !g.isGraded) {
+      await ref.read(gradesProvider.notifier).remove(_gradeId(id));
+    }
+  }
+
+  Future<void> _syncGrade(TaskItem t) async {
+    final grades = ref.read(gradesProvider.notifier);
+    final existing = _linkedGrade(t.id);
+    final courseId = _resolveCourseId(t);
+
+    if (t.isAssignment && courseId != null) {
+      // Create an ungraded placeholder (earned == null → shows "—" and is
+      // left out of the average), or mirror title/class onto an existing
+      // entry without clobbering a score the user may have filled in.
+      await grades.upsert(GradeEntry(
+        id: _gradeId(t.id),
+        courseId: courseId,
+        title: t.title,
+        earned: existing?.earned,
+        total: existing?.total ?? 100,
+        weight: existing?.weight ?? 1,
+        date: existing?.date ?? t.due ?? DateTime.now(),
+      ));
+    } else if (existing != null) {
+      // No longer an assignment, or no class can be resolved.
+      await grades.remove(_gradeId(t.id));
+    }
+  }
 }
 
 class BlockNotifier extends CollectionNotifier<TimeBlock> {
@@ -139,9 +211,8 @@ final coursesProvider =
     NotifierProvider<CourseNotifier, List<Course>>(CourseNotifier.new);
 final gradesProvider =
     NotifierProvider<GradeNotifier, List<GradeEntry>>(GradeNotifier.new);
-final assignmentsProvider =
-    NotifierProvider<AssignmentNotifier, List<Assignment>>(
-        AssignmentNotifier.new);
+final foldersProvider =
+    NotifierProvider<FolderNotifier, List<TaskFolder>>(FolderNotifier.new);
 final tasksProvider =
     NotifierProvider<TaskNotifier, List<TaskItem>>(TaskNotifier.new);
 final blocksProvider =
@@ -174,24 +245,60 @@ final coursesByIdProvider = Provider<Map<String, Course>>((ref) {
   return {for (final c in ref.watch(coursesProvider)) c.id: c};
 });
 
-/// Open assignments sorted by due date (soonest first).
-final upcomingAssignmentsProvider = Provider<List<Assignment>>((ref) {
+/// Open, due-dated tasks sorted soonest-first — the schedulable backlog
+/// shown on the planner and dashboard. Assignment tasks float ahead of
+/// plain ones on the same day.
+final upcomingTasksProvider = Provider<List<TaskItem>>((ref) {
   final list = ref
-      .watch(assignmentsProvider)
-      .where((a) => !a.isDone)
+      .watch(tasksProvider)
+      .where((t) => !t.done && t.due != null)
       .toList()
-    ..sort((a, b) => a.dueDate.compareTo(b.dueDate));
+    ..sort((a, b) {
+      final byDue = a.due!.compareTo(b.due!);
+      if (byDue != 0) return byDue;
+      if (a.isAssignment != b.isAssignment) return a.isAssignment ? -1 : 1;
+      return b.priority.index.compareTo(a.priority.index);
+    });
   return list;
 });
 
-/// Weighted course percentage, or null when the course has no grades yet.
+/// The schedulable backlog minus anything already placed on the planner
+/// (a task with a [TimeBlock] referencing it). Drives the planner's
+/// "To-do to schedule" list so a task vanishes once it's blocked out and
+/// returns if that block is removed.
+final unscheduledTasksProvider = Provider<List<TaskItem>>((ref) {
+  final scheduled = <String>{
+    for (final b in ref.watch(blocksProvider))
+      if (b.taskId != null) b.taskId!,
+  };
+  return ref
+      .watch(upcomingTasksProvider)
+      .where((t) => !scheduled.contains(t.id))
+      .toList();
+});
+
+/// Folders paired with their resolved [Course] link (null when unlinked).
+final foldersWithCourseProvider =
+    Provider<List<(TaskFolder, Course?)>>((ref) {
+  final byId = ref.watch(coursesByIdProvider);
+  return [
+    for (final f in ref.watch(foldersProvider))
+      (f, f.courseId == null ? null : byId[f.courseId]),
+  ];
+});
+
+/// Weighted course percentage, or null when the course has no *graded*
+/// items yet. Ungraded placeholders (e.g. assignments awaiting a score)
+/// are skipped entirely so they don't drag the average down.
 double? courseGrade(List<GradeEntry> grades, String courseId) {
-  final items = grades.where((g) => g.courseId == courseId).toList();
+  final items = grades
+      .where((g) => g.courseId == courseId && g.isGraded)
+      .toList();
   if (items.isEmpty) return null;
   var weighted = 0.0;
   var weightSum = 0.0;
   for (final g in items) {
-    weighted += g.percent * g.weight;
+    weighted += g.percent! * g.weight;
     weightSum += g.weight;
   }
   return weightSum == 0 ? null : weighted / weightSum;

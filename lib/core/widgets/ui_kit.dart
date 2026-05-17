@@ -271,6 +271,35 @@ String relativeDay(DateTime date) {
   return '${months[date.month - 1]} ${date.day}';
 }
 
+/// Reusable destructive-action confirmation. Returns true if confirmed.
+Future<bool> confirmDelete(
+  BuildContext context, {
+  required String title,
+  required String message,
+}) async {
+  final result = await showGlassDialog<bool>(
+    context,
+    title: title,
+    content: Text(message,
+        style: const TextStyle(
+            color: AppPalette.textSecondary, height: 1.4)),
+    actions: (dialogContext) => [
+      TextButton(
+        onPressed: () => Navigator.pop(dialogContext, false),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        style: FilledButton.styleFrom(
+            backgroundColor: AppPalette.danger,
+            foregroundColor: const Color(0xFF15132B)),
+        onPressed: () => Navigator.pop(dialogContext, true),
+        child: const Text('Delete'),
+      ),
+    ],
+  );
+  return result ?? false;
+}
+
 String hhmm(int minutes) {
   final h = (minutes ~/ 60) % 24;
   final m = minutes % 60;

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../features/dashboard/customize_page.dart';
 import '../features/dashboard/dashboard_page.dart';
 import '../features/focus/focus_page.dart';
 import '../features/grades/grades_page.dart';
@@ -31,6 +32,10 @@ final appRouter = GoRouter(
         GoRoute(
           path: '/dashboard',
           pageBuilder: (context, state) => _fade(const DashboardPage()),
+        ),
+        GoRoute(
+          path: '/customize',
+          pageBuilder: (context, state) => _fade(const CustomizePage()),
         ),
         GoRoute(
           path: '/planner',

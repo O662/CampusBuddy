@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:table_calendar/table_calendar.dart';
 
 import '../../core/theme/app_palette.dart';
+import '../../core/widgets/adaptive_draggable.dart';
 import '../../core/widgets/glass.dart';
 import '../../core/widgets/entry_dialogs.dart';
 import '../../core/widgets/ui_kit.dart';
@@ -39,7 +40,7 @@ class _PlannerPageState extends ConsumerState<PlannerPage> {
   Widget build(BuildContext context) {
     return PageBody(
       title: 'Planner',
-      subtitle: 'Drag an assignment onto a day, then slide it to block out time.',
+      subtitle: 'Drag a to-do onto a day, then slide it to block out time.',
       scrollable: false,
       actions: [
         SoftButton(
@@ -52,12 +53,13 @@ class _PlannerPageState extends ConsumerState<PlannerPage> {
         ),
         const SizedBox(width: 8),
         SoftButton(
-          label: 'New assignment',
+          label: 'New task',
           filled: true,
           onTap: () async {
-            final a = await showAssignmentDialog(context,
+            final t = await showTaskDialog(context,
+                folders: ref.read(foldersProvider),
                 courses: ref.read(coursesProvider));
-            if (a != null) ref.read(assignmentsProvider.notifier).upsert(a);
+            if (t != null) ref.read(tasksProvider.notifier).save(t);
           },
         ),
       ],
@@ -117,8 +119,22 @@ class _SidePanel extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final assignments = ref.watch(upcomingAssignmentsProvider);
+    final tasks = ref.watch(unscheduledTasksProvider);
     final courses = ref.watch(coursesByIdProvider);
+    final folders = ref.watch(foldersProvider);
+
+    Color colorFor(TaskItem t) {
+      var courseId = t.courseId;
+      TaskFolder? folder;
+      for (final f in folders) {
+        if (f.id == t.folderId) folder = f;
+      }
+      courseId ??= folder?.courseId;
+      if (courseId != null && courses[courseId] != null) {
+        return courses[courseId]!.color;
+      }
+      return folder?.color ?? AppPalette.lavender;
+    }
 
     final content = Column(
       children: [
@@ -161,20 +177,14 @@ class _SidePanel extends ConsumerWidget {
           ),
           const SizedBox(height: 16),
           GlassCard(
-            title: 'Assignments to schedule',
+            title: 'To-do to schedule',
             icon: Icons.drag_indicator_rounded,
-            child: assignments.isEmpty
+            child: tasks.isEmpty
                 ? const EmptyHint('Nothing to schedule. 🎈')
                 : Column(
                     children: [
-                      for (final a in assignments)
-                        _AssignmentChip(
-                          assignment: a,
-                          color: a.courseId == null
-                              ? AppPalette.lavender
-                              : courses[a.courseId]?.color ??
-                                  AppPalette.lavender,
-                        ),
+                      for (final t in tasks)
+                        _TaskChip(task: t, color: colorFor(t)),
                     ],
                   ),
           ),
@@ -185,10 +195,10 @@ class _SidePanel extends ConsumerWidget {
   }
 }
 
-class _AssignmentChip extends StatelessWidget {
-  const _AssignmentChip({required this.assignment, required this.color});
+class _TaskChip extends StatelessWidget {
+  const _TaskChip({required this.task, required this.color});
 
-  final Assignment assignment;
+  final TaskItem task;
   final Color color;
 
   @override
@@ -204,18 +214,23 @@ class _AssignmentChip extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(Icons.drag_indicator_rounded, size: 18, color: color),
+          Icon(
+              task.isAssignment
+                  ? Icons.school_rounded
+                  : Icons.drag_indicator_rounded,
+              size: 18,
+              color: color),
           const SizedBox(width: 8),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(assignment.title,
+                Text(task.title,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontWeight: FontWeight.w600)),
                 Text(
-                    'Due ${relativeDay(assignment.dueDate)} · ~${assignment.estimatedMinutes}m',
+                    '${task.due == null ? 'No due date' : 'Due ${relativeDay(task.due!)}'} · ~${task.estimatedMinutes}m',
                     style: const TextStyle(
                         fontSize: 12, color: AppPalette.textSecondary)),
               ],
@@ -225,8 +240,8 @@ class _AssignmentChip extends StatelessWidget {
       ),
     );
 
-    return LongPressDraggable<Assignment>(
-      data: assignment,
+    return AdaptiveDraggable<TaskItem>(
+      data: task,
       dragAnchorStrategy: pointerDragAnchorStrategy,
       feedback: Opacity(opacity: 0.9, child: Material(
           color: Colors.transparent, child: card)),
@@ -401,6 +416,7 @@ class _DayColumnState extends ConsumerState<_DayColumn> {
               ),
               for (final b in widget.blocks)
                 _BlockWidget(
+                  key: ValueKey(b.id),
                   block: b,
                   onResize: (newEnd) => ref
                       .read(blocksProvider.notifier)
@@ -416,12 +432,12 @@ class _DayColumnState extends ConsumerState<_DayColumn> {
         final minute = _minuteFromGlobal(details.offset);
         final data = details.data;
         final notifier = ref.read(blocksProvider.notifier);
-        if (data is Assignment) {
+        if (data is TaskItem) {
           final dur = data.estimatedMinutes.clamp(_snap, 600).toInt();
           notifier.upsert(TimeBlock(
             id: newId(),
             title: data.title,
-            assignmentId: data.id,
+            taskId: data.id,
             day: _midnight(widget.day),
             startMinute: minute,
             endMinute:
@@ -442,8 +458,9 @@ class _DayColumnState extends ConsumerState<_DayColumn> {
   }
 }
 
-class _BlockWidget extends StatelessWidget {
+class _BlockWidget extends StatefulWidget {
   const _BlockWidget({
+    super.key,
     required this.block,
     required this.onResize,
     required this.onDelete,
@@ -454,13 +471,33 @@ class _BlockWidget extends StatelessWidget {
   final VoidCallback onDelete;
 
   @override
+  State<_BlockWidget> createState() => _BlockWidgetState();
+}
+
+class _BlockWidgetState extends State<_BlockWidget> {
+  /// Un-snapped end (minutes from midnight) while a resize drag is active;
+  /// null when not resizing. Tracking raw pixels makes the bottom edge
+  /// follow the finger/mouse smoothly instead of jumping in 15-min steps;
+  /// the value is snapped and committed once on release.
+  double? _liveEnd;
+
+  int get _snappedLiveEnd =>
+      ((_liveEnd! / _snap).round() * _snap)
+          .clamp(widget.block.startMinute + _snap, _endHour * 60)
+          .toInt();
+
+  @override
   Widget build(BuildContext context) {
+    final block = widget.block;
     final top = (block.startMinute - _startHour * 60).toDouble();
-    final double height = block.durationMinutes
-        .toDouble()
+    final endMinute = _liveEnd ?? block.endMinute.toDouble();
+    final double height = (endMinute - block.startMinute)
         .clamp(_snap.toDouble(), 2000.0)
         .toDouble();
     final color = block.color;
+    // While resizing, show the snapped end the user will land on.
+    final shownEnd = _liveEnd == null ? block.endMinute : _snappedLiveEnd;
+    final handleH = (height * 0.4).clamp(14.0, 22.0).toDouble();
 
     final body = Container(
       decoration: BoxDecoration(
@@ -478,7 +515,7 @@ class _BlockWidget extends StatelessWidget {
               style: const TextStyle(
                   fontSize: 12, fontWeight: FontWeight.w700)),
           Text(
-              '${hhmm(block.startMinute)} – ${hhmm(block.endMinute)}',
+              '${hhmm(block.startMinute)} – ${hhmm(shownEnd)}',
               style: const TextStyle(
                   fontSize: 10, color: AppPalette.textSecondary)),
         ],
@@ -490,60 +527,112 @@ class _BlockWidget extends StatelessWidget {
       left: 3,
       right: 3,
       height: height,
-      child: LongPressDraggable<TimeBlock>(
-        data: block,
-        dragAnchorStrategy: pointerDragAnchorStrategy,
-        feedback: SizedBox(
-          width: 150,
-          height: height,
-          child: Opacity(opacity: 0.85, child: Material(
-              color: Colors.transparent, child: body)),
-        ),
-        childWhenDragging: Opacity(opacity: 0.3, child: body),
-        child: Stack(
-          children: [
-            Positioned.fill(
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: AdaptiveDraggable<TimeBlock>(
+              data: block,
+              dragAnchorStrategy: pointerDragAnchorStrategy,
+              feedback: SizedBox(
+                width: 150,
+                height: height,
+                child: Opacity(opacity: 0.85, child: Material(
+                    color: Colors.transparent, child: body)),
+              ),
+              childWhenDragging: Opacity(opacity: 0.3, child: body),
               child: GestureDetector(
                 onTap: () => _menu(context),
                 child: body,
               ),
             ),
-            // bottom resize handle
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              height: 14,
+          ),
+          // Resize grip — a sibling layered *above* the draggable (not a
+          // descendant) and opaque, so a drag starting here always resizes
+          // (never moves) the block. A roomy hit area + resize cursor make
+          // it easy to grab with either a finger or a mouse.
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: handleH,
+            child: MouseRegion(
+              cursor: SystemMouseCursors.resizeUpDown,
               child: GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onVerticalDragUpdate: (d) {
-                  final newEnd = ((block.endMinute + d.delta.dy.round()) /
-                              _snap)
-                          .round() *
-                      _snap;
-                  onResize(newEnd
-                      .clamp(block.startMinute + _snap, _endHour * 60)
-                      .toInt());
+                behavior: HitTestBehavior.opaque,
+                onVerticalDragStart: (_) => setState(
+                    () => _liveEnd = block.endMinute.toDouble()),
+                onVerticalDragUpdate: (d) => setState(() {
+                  _liveEnd = ((_liveEnd ?? block.endMinute.toDouble()) +
+                          d.delta.dy)
+                      .clamp((block.startMinute + _snap).toDouble(),
+                          (_endHour * 60).toDouble());
+                }),
+                onVerticalDragEnd: (_) {
+                  if (_liveEnd != null) widget.onResize(_snappedLiveEnd);
+                  setState(() => _liveEnd = null);
                 },
                 child: Center(
                   child: Container(
-                    width: 28,
-                    height: 4,
+                    width: 40,
+                    height: 5,
                     decoration: BoxDecoration(
                       color: color,
-                      borderRadius: BorderRadius.circular(2),
+                      borderRadius: BorderRadius.circular(3),
                     ),
                   ),
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+          // One-tap remove. Layered above the draggable so its tap is
+          // isolated; removing the block returns the to-do to the backlog.
+          Positioned(
+            top: 2,
+            right: 2,
+            child: Tooltip(
+              message: block.taskId != null
+                  ? 'Remove (back to backlog)'
+                  : 'Remove from planner',
+              child: Material(
+                color: Colors.black.withValues(alpha: 0.28),
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: () => _sendBack(context),
+                  child: const Padding(
+                    padding: EdgeInsets.all(3),
+                    child: Icon(Icons.close_rounded,
+                        size: 14, color: AppPalette.textPrimary),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
+  /// Remove this block. If it came from a to-do, that to-do reappears in
+  /// the planner backlog (see [unscheduledTasksProvider]); a brief snackbar
+  /// confirms where it went.
+  void _sendBack(BuildContext context) {
+    final messenger = ScaffoldMessenger.of(context);
+    final linked = widget.block.taskId != null;
+    final title = widget.block.title;
+    widget.onDelete();
+    messenger.showSnackBar(SnackBar(
+      content: Text(linked
+          ? '"$title" sent back to the backlog'
+          : '"$title" removed from the planner'),
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 2),
+    ));
+  }
+
   void _menu(BuildContext context) {
+    final block = widget.block;
+    final pageContext = context;
     showGlassDialog<void>(
       context,
       title: block.title,
@@ -552,16 +641,18 @@ class _BlockWidget extends StatelessWidget {
         '  ·  ${block.durationMinutes} min',
         style: const TextStyle(color: AppPalette.textSecondary),
       ),
-      actions: (context) => [
+      actions: (dialogContext) => [
         TextButton(
           onPressed: () {
-            onDelete();
-            Navigator.pop(context);
+            Navigator.pop(dialogContext);
+            _sendBack(pageContext);
           },
-          child: const Text('Remove from planner'),
+          child: Text(block.taskId != null
+              ? 'Send back to backlog'
+              : 'Remove from planner'),
         ),
         FilledButton(
-          onPressed: () => Navigator.pop(context),
+          onPressed: () => Navigator.pop(dialogContext),
           child: const Text('Close'),
         ),
       ],

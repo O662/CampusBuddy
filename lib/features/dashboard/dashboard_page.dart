@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_palette.dart';
+import '../../core/widgets/adaptive_draggable.dart';
 import '../../core/widgets/glass.dart';
 import '../../core/widgets/entry_dialogs.dart';
 import '../../core/widgets/ui_kit.dart';
@@ -28,22 +30,28 @@ class DashboardPage extends ConsumerWidget {
     return PageBody(
       title: '$greeting, ${profile.name} 👋',
       subtitle: 'Here is everything on your plate today. '
-          'Long-press a card to rearrange your dashboard.',
+          'Drag a card to rearrange; use Customize to choose widgets.',
+      actions: [
+        SoftButton(
+          label: 'Customize',
+          icon: Icons.tune_rounded,
+          onTap: () => context.go('/customize'),
+        ),
+      ],
       child: const _ReorderableDashboard(),
     );
   }
 }
 
 /// Resolves a stable card id to its widget. Keep keys in sync with
-/// [kDashboardCardIds].
-const _dashboardCards = <String, Widget>{
+/// [kDashboardCardIds]. Public so the Customize page can render previews.
+const dashboardCards = <String, Widget>{
   'clock': ClockCard(),
   'weather': WeatherCard(),
   'stats': _StatsStrip(),
   'countdown': CountdownCard(),
   'agenda': _AgendaCard(),
   'overview': TwoWeekOverviewCard(),
-  'assignments': _UpcomingAssignmentsCard(),
   'quickadd': QuickAddCard(),
   'dictionary': DictionaryCard(),
   'notes': StickyNoteCard(),
@@ -54,17 +62,57 @@ const _dashboardCards = <String, Widget>{
   'quote': QuoteCard(),
 };
 
-/// The dashboard grid with long-press drag-to-reorder. Cards are laid out
-/// into balanced columns (same masonry as [CardGrid]); dropping one card
-/// onto another reorders the persisted list via [dashboardOrderProvider].
-class _ReorderableDashboard extends ConsumerWidget {
+/// The dashboard grid. Cards lay out into balanced masonry columns; while a
+/// card is dragged the others slide out of the way live (see
+/// [DashboardOrderNotifier]) and the new order is persisted when the drag
+/// ends.
+///
+/// Each slot carries a stable [GlobalKey] so that, when the live reflow moves
+/// a card into a different column, Flutter *reparents* the element rather
+/// than rebuilding it — which is what keeps the in-progress drag alive.
+class _ReorderableDashboard extends ConsumerStatefulWidget {
   const _ReorderableDashboard();
 
+  @override
+  ConsumerState<_ReorderableDashboard> createState() =>
+      _ReorderableDashboardState();
+}
+
+class _ReorderableDashboardState
+    extends ConsumerState<_ReorderableDashboard> {
   static const _spacing = 16.0;
+  final _keys = <String, GlobalKey>{};
+
+  GlobalKey _keyFor(String id) =>
+      _keys.putIfAbsent(id, () => GlobalKey(debugLabel: 'dash-$id'));
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final order = ref.watch(dashboardOrderProvider);
+  Widget build(BuildContext context) {
+    final hidden = ref.watch(dashboardHiddenProvider);
+    final order = ref
+        .watch(dashboardOrderProvider)
+        .where((id) => !hidden.contains(id))
+        .toList();
+    final notifier = ref.read(dashboardOrderProvider.notifier);
+
+    if (order.isEmpty) {
+      return GlassContainer(
+        child: Column(
+          children: [
+            const EmptyHint(
+                'Every widget is hidden. Add some back from Customize.',
+                icon: Icons.dashboard_customize_rounded),
+            const SizedBox(height: 12),
+            SoftButton(
+              label: 'Customize',
+              icon: Icons.tune_rounded,
+              filled: true,
+              onTap: () => context.go('/customize'),
+            ),
+          ],
+        ),
+      );
+    }
 
     return LayoutBuilder(
       builder: (context, c) {
@@ -73,12 +121,13 @@ class _ReorderableDashboard extends ConsumerWidget {
             (c.maxWidth - _spacing * (cols - 1)) / cols;
 
         Widget slot(String id) => _DashSlot(
+              key: _keyFor(id),
               id: id,
               feedbackWidth: colWidth,
-              onReorder: (moving, target) => ref
-                  .read(dashboardOrderProvider.notifier)
-                  .reorder(moving, target),
-              child: _dashboardCards[id] ?? const SizedBox.shrink(),
+              onDragStarted: () => notifier.beginDrag(id),
+              onMoveOver: () => notifier.moveOver(id),
+              onDragEnd: notifier.endDrag,
+              child: dashboardCards[id] ?? const SizedBox.shrink(),
             );
 
         if (cols == 1) {
@@ -122,48 +171,63 @@ class _ReorderableDashboard extends ConsumerWidget {
 
 class _DashSlot extends StatelessWidget {
   const _DashSlot({
+    super.key,
     required this.id,
     required this.child,
     required this.feedbackWidth,
-    required this.onReorder,
+    required this.onDragStarted,
+    required this.onMoveOver,
+    required this.onDragEnd,
   });
 
   final String id;
   final Widget child;
   final double feedbackWidth;
-  final void Function(String moving, String target) onReorder;
+  final VoidCallback onDragStarted;
+  final VoidCallback onMoveOver;
+  final VoidCallback onDragEnd;
 
   @override
   Widget build(BuildContext context) {
     return DragTarget<String>(
+      // Self can't be a drop/target of itself; everything else, as the held
+      // card passes over it, asks the notifier to slide aside live.
       onWillAcceptWithDetails: (d) => d.data != id,
-      onAcceptWithDetails: (d) => onReorder(d.data, id),
+      onMove: (_) => onMoveOver(),
       builder: (context, candidate, rejected) {
         final hovering = candidate.isNotEmpty;
-        return LongPressDraggable<String>(
+        final card = AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOut,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(
+              color: hovering
+                  ? AppPalette.accent.withValues(alpha: 0.7)
+                  : Colors.transparent,
+              width: 1.5,
+            ),
+          ),
+          child: child,
+        );
+        final feedback = Material(
+          color: Colors.transparent,
+          child: Opacity(
+            opacity: 0.9,
+            child: SizedBox(width: feedbackWidth, child: card),
+          ),
+        );
+        // The held card leaves a soft gap behind; the other cards reflow
+        // around it as the order updates live.
+        final dimmed = Opacity(opacity: 0.2, child: card);
+
+        return AdaptiveDraggable<String>(
           data: id,
-          feedback: Material(
-            color: Colors.transparent,
-            child: Opacity(
-              opacity: 0.9,
-              child: SizedBox(width: feedbackWidth, child: child),
-            ),
-          ),
-          childWhenDragging: Opacity(opacity: 0.25, child: child),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 160),
-            curve: Curves.easeOut,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(28),
-              border: Border.all(
-                color: hovering
-                    ? AppPalette.accent.withValues(alpha: 0.7)
-                    : Colors.transparent,
-                width: 1.5,
-              ),
-            ),
-            child: child,
-          ),
+          feedback: feedback,
+          childWhenDragging: dimmed,
+          onDragStarted: onDragStarted,
+          onDragEnd: onDragEnd,
+          child: card,
         );
       },
     );
@@ -180,9 +244,8 @@ class _StatsStrip extends ConsumerWidget {
     final openTasks =
         ref.watch(tasksProvider).where((t) => !t.done).length;
     final dueSoon = ref
-        .watch(upcomingAssignmentsProvider)
-        .where((a) =>
-            a.dueDate.difference(DateTime.now()).inDays <= 3)
+        .watch(upcomingTasksProvider)
+        .where((t) => t.due!.difference(DateTime.now()).inDays <= 3)
         .length;
 
     Widget stat(IconData i, String v, String l, Color c) => Expanded(
@@ -236,8 +299,8 @@ class _AgendaCard extends ConsumerWidget {
     final events = ref.watch(eventsProvider).where((e) => sameDay(e.start)).toList()
       ..sort((a, b) => a.start.compareTo(b.start));
     final due = ref
-        .watch(assignmentsProvider)
-        .where((a) => !a.isDone && sameDay(a.dueDate))
+        .watch(tasksProvider)
+        .where((t) => !t.done && t.due != null && sameDay(t.due!))
         .toList();
 
     return GlassCard(
@@ -262,84 +325,15 @@ class _AgendaCard extends ConsumerWidget {
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     dense: true,
-                    leading: const Icon(Icons.flag_outlined,
-                        color: AppPalette.peach, size: 20),
+                    leading: Icon(
+                        a.isAssignment
+                            ? Icons.school_rounded
+                            : Icons.flag_outlined,
+                        color: AppPalette.peach,
+                        size: 20),
                     title: Text(a.title),
-                    subtitle: const Text('Due today'),
-                  ),
-              ],
-            ),
-    );
-  }
-}
-
-class _UpcomingAssignmentsCard extends ConsumerWidget {
-  const _UpcomingAssignmentsCard();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final list = ref.watch(upcomingAssignmentsProvider).take(5).toList();
-    final courses = ref.watch(coursesByIdProvider);
-
-    return GlassCard(
-      title: 'Upcoming assignments',
-      icon: Icons.assignment_outlined,
-      trailing: SoftButton(
-        label: 'Add',
-        onTap: () async {
-          final a = await showAssignmentDialog(context,
-              courses: ref.read(coursesProvider));
-          if (a != null) ref.read(assignmentsProvider.notifier).upsert(a);
-        },
-      ),
-      child: list.isEmpty
-          ? const EmptyHint('No assignments yet. Add your first one!')
-          : Column(
-              children: [
-                for (final a in list)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 8,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            color: a.courseId == null
-                                ? AppPalette.textFaint
-                                : courses[a.courseId]?.color ??
-                                    AppPalette.textFaint,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(a.title,
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.w600)),
-                              Text(
-                                '${courses[a.courseId]?.name ?? 'General'} · ~${a.estimatedMinutes}m',
-                                style: const TextStyle(
-                                    fontSize: 12,
-                                    color: AppPalette.textSecondary),
-                              ),
-                            ],
-                          ),
-                        ),
-                        GlassChip(
-                          label: relativeDay(a.dueDate),
-                          color: a.dueDate
-                                      .difference(DateTime.now())
-                                      .inDays <=
-                                  1
-                              ? AppPalette.danger
-                              : AppPalette.lavender,
-                        ),
-                      ],
-                    ),
+                    subtitle:
+                        Text(a.isAssignment ? 'Assignment due today' : 'Due today'),
                   ),
               ],
             ),
@@ -432,39 +426,85 @@ class _GradeBar extends StatelessWidget {
   }
 }
 
+/// Unified to-do + assignments list (the two cards were merged).
 class _TasksCard extends ConsumerWidget {
   const _TasksCard();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final tasks = ref.watch(tasksProvider).where((t) => !t.done).take(6).toList();
+    final coursesById = ref.watch(coursesByIdProvider);
+    final folders = ref.watch(foldersProvider);
+
+    String? courseIdFor(TaskItem t) {
+      if (t.courseId != null) return t.courseId;
+      if (t.folderId == null) return null;
+      for (final f in folders) {
+        if (f.id == t.folderId) return f.courseId;
+      }
+      return null;
+    }
+
+    final open = ref.watch(tasksProvider).where((t) => !t.done).toList()
+      ..sort((a, b) {
+        if ((a.due == null) != (b.due == null)) return a.due == null ? 1 : -1;
+        if (a.due != null && b.due != null) {
+          final byDue = a.due!.compareTo(b.due!);
+          if (byDue != 0) return byDue;
+        }
+        return b.priority.index.compareTo(a.priority.index);
+      });
+    final list = open.take(6).toList();
+
     return GlassCard(
-      title: 'Tasks',
+      title: 'To-do & assignments',
       icon: Icons.checklist_rounded,
       trailing: SoftButton(
         label: 'Add',
         onTap: () async {
-          final t = await showTaskDialog(context);
-          if (t != null) ref.read(tasksProvider.notifier).upsert(t);
+          final t = await showTaskDialog(context,
+              folders: ref.read(foldersProvider),
+              courses: ref.read(coursesProvider));
+          if (t != null) ref.read(tasksProvider.notifier).save(t);
         },
       ),
-      child: tasks.isEmpty
+      child: list.isEmpty
           ? const EmptyHint('All caught up. Nice work!')
           : Column(
               children: [
-                for (final t in tasks)
+                for (final t in list)
                   InkWell(
                     onTap: () => ref
                         .read(tasksProvider.notifier)
-                        .upsert(t.copyWith(done: true)),
+                        .save(t.copyWith(done: true)),
                     child: Padding(
                       padding: const EdgeInsets.symmetric(vertical: 7),
                       child: Row(
                         children: [
-                          const Icon(Icons.radio_button_unchecked,
-                              size: 18, color: AppPalette.textSecondary),
+                          Icon(
+                              t.isAssignment
+                                  ? Icons.school_rounded
+                                  : Icons.radio_button_unchecked,
+                              size: 18,
+                              color: t.isAssignment
+                                  ? (coursesById[courseIdFor(t)]?.color ??
+                                      AppPalette.lavender)
+                                  : AppPalette.textSecondary),
                           const SizedBox(width: 10),
-                          Expanded(child: Text(t.title)),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                              children: [
+                                Text(t.title),
+                                if (t.due != null)
+                                  Text('Due ${relativeDay(t.due!)}',
+                                      style: const TextStyle(
+                                          fontSize: 11,
+                                          color:
+                                              AppPalette.textSecondary)),
+                              ],
+                            ),
+                          ),
                           GlassChip(
                               label: t.priority.label,
                               color: t.priority.color),

@@ -120,18 +120,30 @@ class _CourseCard extends ConsumerWidget {
                     }
                   } else if (v == 'delete') {
                     final n = entries.length;
+                    final linked = entries
+                        .where((g) => g.id.startsWith('task-'))
+                        .length;
+                    final linkedNote = linked == 0
+                        ? ''
+                        : ' $linked linked to-do'
+                            "${linked == 1 ? '' : 's'} will be deleted "
+                            'too.';
                     final ok = await confirmDelete(
                       context,
                       title: 'Delete ${course.name}?',
                       message: n == 0
                           ? 'This class will be removed.'
                           : 'This class and its $n grade'
-                              '${n == 1 ? '' : 's'} will be permanently '
-                              'removed.',
+                              "${n == 1 ? '' : 's'} will be permanently "
+                              'removed.$linkedNote',
                     );
                     if (ok) {
+                      final tasks = ref.read(tasksProvider.notifier);
                       for (final g in entries) {
                         ref.read(gradesProvider.notifier).remove(g.id);
+                        if (g.id.startsWith('task-')) {
+                          tasks.remove(g.id.substring('task-'.length));
+                        }
                       }
                       ref
                           .read(coursesProvider.notifier)
@@ -175,15 +187,22 @@ class _CourseCard extends ConsumerWidget {
                 child: Row(
                   children: [
                     Expanded(child: Text(g.title)),
-                    Text('${g.earned.toStringAsFixed(0)}/${g.total.toStringAsFixed(0)}',
+                    Text(
+                        g.isGraded
+                            ? '${g.earned!.toStringAsFixed(0)}/${g.total.toStringAsFixed(0)}'
+                            : '—  /${g.total.toStringAsFixed(0)}',
                         style: const TextStyle(
                             color: AppPalette.textSecondary)),
                     const SizedBox(width: 10),
                     GlassChip(
-                        label: '${g.percent.toStringAsFixed(0)}%',
-                        color: g.percent >= course.targetGrade
-                            ? AppPalette.success
-                            : AppPalette.warning),
+                        label: g.isGraded
+                            ? '${g.percent!.toStringAsFixed(0)}%'
+                            : '—',
+                        color: !g.isGraded
+                            ? AppPalette.textFaint
+                            : (g.percent! >= course.targetGrade
+                                ? AppPalette.success
+                                : AppPalette.warning)),
                     PopupMenuButton<String>(
                       icon: const Icon(Icons.more_horiz,
                           size: 18, color: AppPalette.textSecondary),
@@ -200,16 +219,28 @@ class _CourseCard extends ConsumerWidget {
                                 .upsert(edited);
                           }
                         } else if (v == 'delete') {
+                          final linkedTask = g.id.startsWith('task-')
+                              ? g.id.substring('task-'.length)
+                              : null;
                           final ok = await confirmDelete(
                             context,
                             title: 'Delete grade?',
-                            message:
-                                '"${g.title}" will be permanently removed.',
+                            message: linkedTask == null
+                                ? '"${g.title}" will be permanently '
+                                    'removed.'
+                                : '"${g.title}" will be removed from '
+                                    'Grades and its matching to-do/'
+                                    'assignment will be deleted too.',
                           );
                           if (ok) {
                             ref
                                 .read(gradesProvider.notifier)
                                 .remove(g.id);
+                            if (linkedTask != null) {
+                              ref
+                                  .read(tasksProvider.notifier)
+                                  .remove(linkedTask);
+                            }
                           }
                         }
                       },
@@ -248,7 +279,10 @@ class _GradeTrendCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final grades = [...ref.watch(gradesProvider)]
+    final grades = ref
+        .watch(gradesProvider)
+        .where((g) => g.isGraded)
+        .toList()
       ..sort((a, b) => a.date.compareTo(b.date));
 
     Widget content;
@@ -262,7 +296,7 @@ class _GradeTrendCard extends ConsumerWidget {
       var wpSum = 0.0;
       for (var i = 0; i < grades.length; i++) {
         wSum += grades[i].weight;
-        wpSum += grades[i].percent * grades[i].weight;
+        wpSum += grades[i].percent! * grades[i].weight;
         spots.add(FlSpot(i.toDouble(), wSum == 0 ? 0 : wpSum / wSum));
       }
       final ys = spots.map((s) => s.y).toList();
@@ -487,31 +521,3 @@ class _FinalGradeCalculatorState
   }
 }
 
-/// Reusable destructive-action confirmation. Returns true if confirmed.
-Future<bool> confirmDelete(
-  BuildContext context, {
-  required String title,
-  required String message,
-}) async {
-  final result = await showGlassDialog<bool>(
-    context,
-    title: title,
-    content: Text(message,
-        style: const TextStyle(
-            color: AppPalette.textSecondary, height: 1.4)),
-    actions: (dialogContext) => [
-      TextButton(
-        onPressed: () => Navigator.pop(dialogContext, false),
-        child: const Text('Cancel'),
-      ),
-      FilledButton(
-        style: FilledButton.styleFrom(
-            backgroundColor: AppPalette.danger,
-            foregroundColor: const Color(0xFF15132B)),
-        onPressed: () => Navigator.pop(dialogContext, true),
-        child: const Text('Delete'),
-      ),
-    ],
-  );
-  return result ?? false;
-}
