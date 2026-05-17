@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_palette.dart';
-import '../../core/widgets/adaptive_draggable.dart';
 import '../../core/widgets/glass.dart';
 import '../../core/widgets/entry_dialogs.dart';
 import '../../core/widgets/ui_kit.dart';
@@ -30,22 +28,15 @@ class DashboardPage extends ConsumerWidget {
     return PageBody(
       title: '$greeting, ${profile.name} 👋',
       subtitle: 'Here is everything on your plate today. '
-          'Drag a card to rearrange; use Customize to choose widgets.',
-      actions: [
-        SoftButton(
-          label: 'Customize',
-          icon: Icons.tune_rounded,
-          onTap: () => context.go('/customize'),
-        ),
-      ],
+          'Long-press a card to rearrange your dashboard.',
       child: const _ReorderableDashboard(),
     );
   }
 }
 
 /// Resolves a stable card id to its widget. Keep keys in sync with
-/// [kDashboardCardIds]. Public so the Customize page can render previews.
-const dashboardCards = <String, Widget>{
+/// [kDashboardCardIds].
+const _dashboardCards = <String, Widget>{
   'clock': ClockCard(),
   'weather': WeatherCard(),
   'stats': _StatsStrip(),
@@ -62,57 +53,17 @@ const dashboardCards = <String, Widget>{
   'quote': QuoteCard(),
 };
 
-/// The dashboard grid. Cards lay out into balanced masonry columns; while a
-/// card is dragged the others slide out of the way live (see
-/// [DashboardOrderNotifier]) and the new order is persisted when the drag
-/// ends.
-///
-/// Each slot carries a stable [GlobalKey] so that, when the live reflow moves
-/// a card into a different column, Flutter *reparents* the element rather
-/// than rebuilding it — which is what keeps the in-progress drag alive.
-class _ReorderableDashboard extends ConsumerStatefulWidget {
+/// The dashboard grid with long-press drag-to-reorder. Cards are laid out
+/// into balanced columns (same masonry as [CardGrid]); dropping one card
+/// onto another reorders the persisted list via [dashboardOrderProvider].
+class _ReorderableDashboard extends ConsumerWidget {
   const _ReorderableDashboard();
 
-  @override
-  ConsumerState<_ReorderableDashboard> createState() =>
-      _ReorderableDashboardState();
-}
-
-class _ReorderableDashboardState
-    extends ConsumerState<_ReorderableDashboard> {
   static const _spacing = 16.0;
-  final _keys = <String, GlobalKey>{};
-
-  GlobalKey _keyFor(String id) =>
-      _keys.putIfAbsent(id, () => GlobalKey(debugLabel: 'dash-$id'));
 
   @override
-  Widget build(BuildContext context) {
-    final hidden = ref.watch(dashboardHiddenProvider);
-    final order = ref
-        .watch(dashboardOrderProvider)
-        .where((id) => !hidden.contains(id))
-        .toList();
-    final notifier = ref.read(dashboardOrderProvider.notifier);
-
-    if (order.isEmpty) {
-      return GlassContainer(
-        child: Column(
-          children: [
-            const EmptyHint(
-                'Every widget is hidden. Add some back from Customize.',
-                icon: Icons.dashboard_customize_rounded),
-            const SizedBox(height: 12),
-            SoftButton(
-              label: 'Customize',
-              icon: Icons.tune_rounded,
-              filled: true,
-              onTap: () => context.go('/customize'),
-            ),
-          ],
-        ),
-      );
-    }
+  Widget build(BuildContext context, WidgetRef ref) {
+    final order = ref.watch(dashboardOrderProvider);
 
     return LayoutBuilder(
       builder: (context, c) {
@@ -121,13 +72,12 @@ class _ReorderableDashboardState
             (c.maxWidth - _spacing * (cols - 1)) / cols;
 
         Widget slot(String id) => _DashSlot(
-              key: _keyFor(id),
               id: id,
               feedbackWidth: colWidth,
-              onDragStarted: () => notifier.beginDrag(id),
-              onMoveOver: () => notifier.moveOver(id),
-              onDragEnd: notifier.endDrag,
-              child: dashboardCards[id] ?? const SizedBox.shrink(),
+              onReorder: (moving, target) => ref
+                  .read(dashboardOrderProvider.notifier)
+                  .reorder(moving, target),
+              child: _dashboardCards[id] ?? const SizedBox.shrink(),
             );
 
         if (cols == 1) {
@@ -171,63 +121,48 @@ class _ReorderableDashboardState
 
 class _DashSlot extends StatelessWidget {
   const _DashSlot({
-    super.key,
     required this.id,
     required this.child,
     required this.feedbackWidth,
-    required this.onDragStarted,
-    required this.onMoveOver,
-    required this.onDragEnd,
+    required this.onReorder,
   });
 
   final String id;
   final Widget child;
   final double feedbackWidth;
-  final VoidCallback onDragStarted;
-  final VoidCallback onMoveOver;
-  final VoidCallback onDragEnd;
+  final void Function(String moving, String target) onReorder;
 
   @override
   Widget build(BuildContext context) {
     return DragTarget<String>(
-      // Self can't be a drop/target of itself; everything else, as the held
-      // card passes over it, asks the notifier to slide aside live.
       onWillAcceptWithDetails: (d) => d.data != id,
-      onMove: (_) => onMoveOver(),
+      onAcceptWithDetails: (d) => onReorder(d.data, id),
       builder: (context, candidate, rejected) {
         final hovering = candidate.isNotEmpty;
-        final card = AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(28),
-            border: Border.all(
-              color: hovering
-                  ? AppPalette.accent.withValues(alpha: 0.7)
-                  : Colors.transparent,
-              width: 1.5,
+        return LongPressDraggable<String>(
+          data: id,
+          feedback: Material(
+            color: Colors.transparent,
+            child: Opacity(
+              opacity: 0.9,
+              child: SizedBox(width: feedbackWidth, child: child),
             ),
           ),
-          child: child,
-        );
-        final feedback = Material(
-          color: Colors.transparent,
-          child: Opacity(
-            opacity: 0.9,
-            child: SizedBox(width: feedbackWidth, child: card),
+          childWhenDragging: Opacity(opacity: 0.25, child: child),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.easeOut,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(
+                color: hovering
+                    ? AppPalette.accent.withValues(alpha: 0.7)
+                    : Colors.transparent,
+                width: 1.5,
+              ),
+            ),
+            child: child,
           ),
-        );
-        // The held card leaves a soft gap behind; the other cards reflow
-        // around it as the order updates live.
-        final dimmed = Opacity(opacity: 0.2, child: card);
-
-        return AdaptiveDraggable<String>(
-          data: id,
-          feedback: feedback,
-          childWhenDragging: dimmed,
-          onDragStarted: onDragStarted,
-          onDragEnd: onDragEnd,
-          child: card,
         );
       },
     );
