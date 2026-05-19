@@ -528,8 +528,17 @@ class QuickAddCard extends ConsumerWidget {
           }),
           tile(Icons.school_outlined, 'Course', AppPalette.lavender,
               () async {
-            final c = await showCourseDialog(context);
+            final created = <Semester>[];
+            final c = await showCourseDialog(context,
+                institutions: ref.read(institutionsProvider),
+                semesters: ref.read(semestersProvider),
+                createdSemesters: created,
+                onCreateSemester: (institutionId) => showSemesterDialog(
+                    context, institutionId: institutionId));
             if (c != null) {
+              for (final s in created) {
+                ref.read(semestersProvider.notifier).upsert(s);
+              }
               ref.read(coursesProvider.notifier).upsert(c);
             }
           }),

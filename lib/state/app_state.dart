@@ -121,9 +121,33 @@ class TaskNotifier extends CollectionNotifier<TaskItem> {
 
   /// Persist a task and keep its placeholder grade in sync. Use this from
   /// the UI instead of [upsert] so the assignment↔grade link is maintained.
+  ///
+  /// Recurrence: completing a repeating task spawns its next occurrence
+  /// (a fresh task, due one cadence later). Centralised here so every
+  /// completion path — dashboard, to-do, planner — gets it for free.
   Future<void> save(TaskItem task) async {
+    final prev = _byId(task.id);
     await upsert(task);
     await _syncGrade(task);
+
+    final justCompleted = task.done && (prev == null || !prev.done);
+    if (task.recurrence.repeats && justCompleted) {
+      final anchor = task.due ?? DateTime.now();
+      final next = TaskItem(
+        id: newId(),
+        title: task.title,
+        priority: task.priority,
+        due: task.recurrence.next(anchor),
+        createdAt: DateTime.now(),
+        folderId: task.folderId,
+        isAssignment: task.isAssignment,
+        courseId: task.courseId,
+        estimatedMinutes: task.estimatedMinutes,
+        recurrence: task.recurrence,
+      );
+      await upsert(next);
+      await _syncGrade(next);
+    }
   }
 
   /// Remove a task; drop its placeholder grade only when still ungraded
@@ -155,6 +179,12 @@ class TaskNotifier extends CollectionNotifier<TaskItem> {
         total: existing?.total ?? 100,
         weight: existing?.weight ?? 1,
         date: existing?.date ?? t.due ?? DateTime.now(),
+        // Mirror only title/class — never clobber the score, category or
+        // extra credit the user filled in on the Grades side.
+        categoryId: existing?.categoryId,
+        extraCredit: existing?.extraCredit ?? false,
+        extraCreditIsPoints: existing?.extraCreditIsPoints ?? false,
+        extraCreditValue: existing?.extraCreditValue,
       ));
     } else if (existing != null) {
       // No longer an assignment, or no class can be resolved.
@@ -207,6 +237,61 @@ class CardNotifier extends CollectionNotifier<Flashcard> {
   Flashcard decode(Map j) => Flashcard.fromJson(j);
 }
 
+class GradeCategoryNotifier extends CollectionNotifier<GradeCategory> {
+  @override
+  String get boxName => LocalStore.gradeCategories;
+  @override
+  String idOf(GradeCategory i) => i.id;
+  @override
+  Map<String, dynamic> encode(GradeCategory i) => i.toJson();
+  @override
+  GradeCategory decode(Map j) => GradeCategory.fromJson(j);
+}
+
+class NoteNotifier extends CollectionNotifier<Note> {
+  @override
+  String get boxName => LocalStore.notes;
+  @override
+  String idOf(Note i) => i.id;
+  @override
+  Map<String, dynamic> encode(Note i) => i.toJson();
+  @override
+  Note decode(Map j) => Note.fromJson(j);
+}
+
+class InstitutionNotifier extends CollectionNotifier<Institution> {
+  @override
+  String get boxName => LocalStore.institutions;
+  @override
+  String idOf(Institution i) => i.id;
+  @override
+  Map<String, dynamic> encode(Institution i) => i.toJson();
+  @override
+  Institution decode(Map j) => Institution.fromJson(j);
+}
+
+class SemesterNotifier extends CollectionNotifier<Semester> {
+  @override
+  String get boxName => LocalStore.semesters;
+  @override
+  String idOf(Semester i) => i.id;
+  @override
+  Map<String, dynamic> encode(Semester i) => i.toJson();
+  @override
+  Semester decode(Map j) => Semester.fromJson(j);
+}
+
+class PastCourseNotifier extends CollectionNotifier<PastCourse> {
+  @override
+  String get boxName => LocalStore.pastCourses;
+  @override
+  String idOf(PastCourse i) => i.id;
+  @override
+  Map<String, dynamic> encode(PastCourse i) => i.toJson();
+  @override
+  PastCourse decode(Map j) => PastCourse.fromJson(j);
+}
+
 final coursesProvider =
     NotifierProvider<CourseNotifier, List<Course>>(CourseNotifier.new);
 final gradesProvider =
@@ -223,6 +308,20 @@ final decksProvider =
     NotifierProvider<DeckNotifier, List<Deck>>(DeckNotifier.new);
 final cardsProvider =
     NotifierProvider<CardNotifier, List<Flashcard>>(CardNotifier.new);
+final notesProvider =
+    NotifierProvider<NoteNotifier, List<Note>>(NoteNotifier.new);
+final gradeCategoriesProvider =
+    NotifierProvider<GradeCategoryNotifier, List<GradeCategory>>(
+        GradeCategoryNotifier.new);
+final institutionsProvider =
+    NotifierProvider<InstitutionNotifier, List<Institution>>(
+        InstitutionNotifier.new);
+final semestersProvider =
+    NotifierProvider<SemesterNotifier, List<Semester>>(
+        SemesterNotifier.new);
+final pastCoursesProvider =
+    NotifierProvider<PastCourseNotifier, List<PastCourse>>(
+        PastCourseNotifier.new);
 
 class ProfileNotifier extends Notifier<UserProfile> {
   @override
@@ -243,6 +342,10 @@ final profileProvider =
 
 final coursesByIdProvider = Provider<Map<String, Course>>((ref) {
   return {for (final c in ref.watch(coursesProvider)) c.id: c};
+});
+
+final institutionsByIdProvider = Provider<Map<String, Institution>>((ref) {
+  return {for (final i in ref.watch(institutionsProvider)) i.id: i};
 });
 
 /// Open, due-dated tasks sorted soonest-first — the schedulable backlog
@@ -298,10 +401,111 @@ double? courseGrade(List<GradeEntry> grades, String courseId) {
   var weighted = 0.0;
   var weightSum = 0.0;
   for (final g in items) {
-    weighted += g.percent! * g.weight;
+    weighted += g.effectivePercent! * g.weight;
     weightSum += g.weight;
   }
   return weightSum == 0 ? null : weighted / weightSum;
+}
+
+/// Phase-2 course %: weighted categories + extra credit. Falls back to a
+/// flat weighted average when the course has no categories. Categories
+/// (and the uncategorized bucket) with no graded items are excluded and
+/// the rest renormalised — same "ignore ungraded" rule used elsewhere.
+double? courseWeightedPercent(
+  Course course,
+  List<GradeCategory> categories,
+  List<GradeEntry> allEntries,
+) {
+  final courseEntries =
+      allEntries.where((g) => g.courseId == course.id).toList();
+  final graded = courseEntries.where((g) => g.isGraded).toList();
+
+  // Course-level curve + stand-alone bonus-only EC items flat-add to the
+  // final %. A graded item's *own* extra credit is already baked into its
+  // effectivePercent and rides the weighted average like a normal score.
+  var bonus = course.extraCreditPct;
+  for (final g in courseEntries) {
+    if (g.isBonusOnly) bonus += g.extraCreditValue ?? 0;
+  }
+  final normal = graded;
+
+  double? avgOf(Iterable<GradeEntry> items) {
+    var w = 0.0, wp = 0.0;
+    for (final g in items) {
+      wp += g.effectivePercent! * g.weight;
+      w += g.weight;
+    }
+    return w == 0 ? null : wp / w;
+  }
+
+  final cats =
+      categories.where((c) => c.courseId == course.id).toList();
+  double? base;
+  if (cats.isEmpty) {
+    base = avgOf(normal);
+  } else {
+    final buckets = <(double, double)>[]; // (weight, pct)
+    var catWeightSum = 0.0;
+    for (final c in cats) {
+      catWeightSum += c.weightPercent;
+      final a = avgOf(normal.where((g) => g.categoryId == c.id));
+      if (a != null && c.weightPercent > 0) buckets.add((c.weightPercent, a));
+    }
+    final leftover = 100 - catWeightSum;
+    final uncategorized = avgOf(normal.where((g) => g.categoryId == null));
+    if (uncategorized != null && leftover > 0) {
+      buckets.add((leftover, uncategorized));
+    }
+    if (buckets.isEmpty) {
+      base = avgOf(normal); // weights unset — don't silently drop grades
+    } else {
+      var w = 0.0, wp = 0.0;
+      for (final b in buckets) {
+        w += b.$1;
+        wp += b.$1 * b.$2;
+      }
+      base = w == 0 ? null : wp / w;
+    }
+  }
+
+  if (base == null) return bonus > 0 ? bonus : null;
+  final total = base + bonus;
+  return total < 0 ? 0 : total;
+}
+
+/// The course's final grade rendered per its grading mode + its
+/// institution's system (graded mode uses the course's own cutoffs).
+String courseResult(Course course, Institution? inst, double? pct) {
+  if (pct == null) return '—';
+  switch (course.gradingMode) {
+    case CourseGradingMode.passFail:
+      return pct >= course.passCutoff ? 'Pass' : 'Fail';
+    case CourseGradingMode.satisfactory:
+      return pct >= course.passCutoff
+          ? 'Satisfactory'
+          : 'Unsatisfactory';
+    case CourseGradingMode.graded:
+      final system = inst?.gradeSystem ?? GradeSystem.percent;
+      switch (system) {
+        case GradeSystem.percent:
+          return '${pct.toStringAsFixed(1)}%';
+        case GradeSystem.letter:
+          return course.letterFor(pct);
+        case GradeSystem.points:
+          // Complex uses the institution's standard fractional table;
+          // simple maps the course's own letter cutoffs to whole points.
+          if (inst!.gpaComplex) return inst.gpaText(pct);
+          final base = switch (course.letterFor(pct)) {
+            'A' => 4.0,
+            'B' => 3.0,
+            'C' => 2.0,
+            'D' => 1.0,
+            _ => 0.0,
+          };
+          return (base * (inst.effectiveGpaMax / 4.0))
+              .toStringAsFixed(1);
+      }
+  }
 }
 
 /// Overall GPA-ish average across all courses that have grades (0..100).
@@ -319,4 +523,110 @@ final overallGradeProvider = Provider<double?>((ref) {
 
 final dueCardCountProvider = Provider<int>((ref) {
   return ref.watch(cardsProvider).where((c) => c.isDue).length;
+});
+
+// ---------------------------------------------------------------------------
+// Academic history — credit-weighted GPA. GPA = Σ(gradePoints×credits) /
+// Σ credits. Null when there are no credits to average.
+// ---------------------------------------------------------------------------
+
+double? semesterGpa(Iterable<PastCourse> classes) {
+  var quality = 0.0;
+  var credits = 0.0;
+  for (final p in classes) {
+    quality += p.qualityPoints;
+    credits += p.creditHours;
+  }
+  return credits <= 0 ? null : quality / credits;
+}
+
+/// One point on the GPA chart: a semester (that has classes), its GPA, and
+/// the cumulative GPA across every semester up to and including it.
+typedef GpaPoint = ({Semester semester, double gpa, double cumulative});
+
+/// Semesters of [institutionId] that have classes, chronological, each with
+/// its own GPA and the cumulative GPA *within that institution*. Drives the
+/// per-institution grades chart.
+final gpaSeriesProvider =
+    Provider.family<List<GpaPoint>, String>((ref, institutionId) {
+  final semesters = [
+    for (final s in ref.watch(semestersProvider))
+      if (s.institutionId == institutionId) s,
+  ]..sort((a, b) => a.sortKey.compareTo(b.sortKey));
+  final byId = <String, List<PastCourse>>{};
+  for (final p in ref.watch(pastCoursesProvider)) {
+    byId.putIfAbsent(p.semesterId, () => <PastCourse>[]).add(p);
+  }
+
+  // Live courses pinned to a semester here: their current weighted % is
+  // converted to GPA points (institution's scale) and credit-weighted, so
+  // the active term shows up on the chart and recomputes live.
+  final inst = ref.watch(institutionsByIdProvider)[institutionId];
+  final cats = ref.watch(gradeCategoriesProvider);
+  final grades = ref.watch(gradesProvider);
+  final liveById = <String, List<Course>>{};
+  for (final c in ref.watch(coursesProvider)) {
+    if (c.institutionId == institutionId && c.semesterId != null) {
+      liveById.putIfAbsent(c.semesterId!, () => <Course>[]).add(c);
+    }
+  }
+
+  final out = <GpaPoint>[];
+  var cumQuality = 0.0;
+  var cumCredits = 0.0;
+  for (final s in semesters) {
+    var quality = 0.0;
+    var credits = 0.0;
+    for (final p in (byId[s.id] ?? const <PastCourse>[])) {
+      quality += p.qualityPoints;
+      credits += p.creditHours;
+    }
+    for (final c in (liveById[s.id] ?? const <Course>[])) {
+      final pct = courseWeightedPercent(c, cats, grades);
+      if (pct == null || inst == null) continue;
+      quality += inst.gpaPointsFor(pct) * c.creditHours;
+      credits += c.creditHours;
+    }
+    if (credits <= 0) continue;
+    cumQuality += quality;
+    cumCredits += credits;
+    out.add((
+      semester: s,
+      gpa: quality / credits,
+      cumulative: cumQuality / cumCredits,
+    ));
+  }
+  return out;
+});
+
+/// Institutions that have at least one recorded past class, ordered by
+/// their most-recent semester first — so the grades chart can default to
+/// the institution of the latest semester.
+final institutionsWithHistoryProvider = Provider<List<Institution>>((ref) {
+  final semById = {for (final s in ref.watch(semestersProvider)) s.id: s};
+  final latestKey = <String, int>{}; // institutionId → max semester sortKey
+
+  void mark(String? semesterId) {
+    final s = semesterId == null ? null : semById[semesterId];
+    if (s == null) return;
+    final cur = latestKey[s.institutionId];
+    if (cur == null || s.sortKey > cur) {
+      latestKey[s.institutionId] = s.sortKey;
+    }
+  }
+
+  // Either a recorded past class OR a live course pinned to a semester
+  // makes an institution chartable.
+  for (final p in ref.watch(pastCoursesProvider)) {
+    mark(p.semesterId);
+  }
+  for (final c in ref.watch(coursesProvider)) {
+    mark(c.semesterId);
+  }
+  if (latestKey.isEmpty) return const [];
+  return [
+    for (final i in ref.watch(institutionsProvider))
+      if (latestKey.containsKey(i.id)) i,
+  ]..sort((a, b) =>
+      (latestKey[b.id] ?? 0).compareTo(latestKey[a.id] ?? 0));
 });

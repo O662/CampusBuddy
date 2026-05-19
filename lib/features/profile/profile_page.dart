@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_palette.dart';
+import '../../core/widgets/entry_dialogs.dart';
 import '../../core/widgets/glass.dart';
 import '../../core/widgets/ui_kit.dart';
 import '../../data/models.dart';
@@ -109,6 +110,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
               ],
             ),
           ),
+          const _InstitutionsCard(),
           GlassCard(
             title: 'About CampusBuddy',
             icon: Icons.info_outline_rounded,
@@ -145,6 +147,92 @@ class _LabeledField extends StatelessWidget {
           TextField(controller: controller),
         ],
       ),
+    );
+  }
+}
+
+/// Manage institutions and the grading system each one uses. The chosen
+/// system flows down to every current course filed under that institution.
+class _InstitutionsCard extends ConsumerWidget {
+  const _InstitutionsCard();
+
+  String _systemLabel(Institution i) {
+    switch (i.gradeSystem) {
+      case GradeSystem.percent:
+        return 'Percentage';
+      case GradeSystem.points:
+        final m = i.effectiveGpaMax;
+        final s = m == m.roundToDouble()
+            ? m.toStringAsFixed(1)
+            : m.toString();
+        return 'GPA $s · ${i.gpaComplex ? 'complex' : 'simple'}'
+            '${i.weighted ? ' · weighted' : ''}';
+      case GradeSystem.letter:
+        return 'Letter${i.usePlusMinus ? ' (+/−)' : ''}';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final institutions = [...ref.watch(institutionsProvider)]
+      ..sort((a, b) =>
+          a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    return GlassCard(
+      title: 'Institutions & grading',
+      icon: Icons.account_balance_rounded,
+      trailing: SoftButton(
+        label: 'Add',
+        onTap: () async {
+          final i = await showInstitutionDialog(context);
+          if (i != null) {
+            ref.read(institutionsProvider.notifier).upsert(i);
+          }
+        },
+      ),
+      child: institutions.isEmpty
+          ? const EmptyHint(
+              'Add your school to choose how it grades — that style '
+              'carries to its current courses.')
+          : Column(
+              children: [
+                for (final inst in institutions)
+                  InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () async {
+                      final e = await showInstitutionDialog(context,
+                          existing: inst);
+                      if (e != null) {
+                        ref
+                            .read(institutionsProvider.notifier)
+                            .upsert(e);
+                      }
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 9),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.account_balance_rounded,
+                              size: 18, color: AppPalette.lavender),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(inst.name,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w600)),
+                          ),
+                          GlassChip(
+                              label: _systemLabel(inst),
+                              color: AppPalette.mint),
+                          const SizedBox(width: 4),
+                          const Icon(Icons.edit_rounded,
+                              size: 16,
+                              color: AppPalette.textSecondary),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
     );
   }
 }

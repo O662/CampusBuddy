@@ -25,6 +25,101 @@ DateTime _weekStart(DateTime d) {
   return m.subtract(Duration(days: m.weekday % 7)); // Sun=7%7=0
 }
 
+/// Which calendar the planner's main panel shows.
+enum _PlannerView { week, month }
+
+/// One thing happening on a day — either a calendar [event] or a due
+/// [task]/assignment. Used for the calendars' markers and the month
+/// view's selected-day agenda.
+class _Agenda {
+  const _Agenda({
+    required this.when,
+    required this.color,
+    this.event,
+    this.task,
+  });
+
+  final DateTime when;
+  final Color color;
+  final EventItem? event;
+  final TaskItem? task;
+}
+
+DateTime _dayKey(DateTime d) => DateTime(d.year, d.month, d.day);
+
+/// Accent per event type so lectures/exams read at a glance.
+Color _eventColor(EventType t) => switch (t) {
+      EventType.classSession => AppPalette.periwinkle,
+      EventType.exam => AppPalette.rose,
+      EventType.deadline => AppPalette.peach,
+      EventType.personal => AppPalette.mint,
+    };
+
+/// A task's colour: its course, else its folder's linked course, else the
+/// folder, else a neutral accent. Shared by the backlog and the calendars.
+Color taskColor(
+  TaskItem t,
+  Map<String, Course> courses,
+  List<TaskFolder> folders,
+) {
+  var courseId = t.courseId;
+  TaskFolder? folder;
+  for (final f in folders) {
+    if (f.id == t.folderId) folder = f;
+  }
+  courseId ??= folder?.courseId;
+  if (courseId != null && courses[courseId] != null) {
+    return courses[courseId]!.color;
+  }
+  return folder?.color ?? AppPalette.lavender;
+}
+
+/// Groups every event and open due-task by day, soonest-first within a day.
+/// Watches the relevant providers so the calendars refresh on any change.
+Map<DateTime, List<_Agenda>> _buildDayMap(WidgetRef ref) {
+  final courses = ref.watch(coursesByIdProvider);
+  final folders = ref.watch(foldersProvider);
+  final map = <DateTime, List<_Agenda>>{};
+  void add(DateTime when, _Agenda a) =>
+      map.putIfAbsent(_dayKey(when), () => <_Agenda>[]).add(a);
+
+  for (final e in ref.watch(eventsProvider)) {
+    add(e.start, _Agenda(when: e.start, color: _eventColor(e.type), event: e));
+  }
+  for (final t in ref.watch(tasksProvider)) {
+    if (t.due == null || t.done) continue;
+    add(t.due!,
+        _Agenda(when: t.due!, color: taskColor(t, courses, folders), task: t));
+  }
+  for (final list in map.values) {
+    list.sort((a, b) => a.when.compareTo(b.when));
+  }
+  return map;
+}
+
+/// Up to four colour-coded dots under any day that has events/tasks.
+CalendarBuilders<_Agenda> _markerBuilders() => CalendarBuilders<_Agenda>(
+      markerBuilder: (context, day, items) {
+        if (items.isEmpty) return const SizedBox.shrink();
+        return Positioned(
+          bottom: 5,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final a in items.take(4))
+                Container(
+                  width: 6,
+                  height: 6,
+                  margin: const EdgeInsets.symmetric(horizontal: 1),
+                  decoration:
+                      BoxDecoration(color: a.color, shape: BoxShape.circle),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+
 class PlannerPage extends ConsumerStatefulWidget {
   const PlannerPage({super.key});
 
@@ -35,21 +130,41 @@ class PlannerPage extends ConsumerStatefulWidget {
 class _PlannerPageState extends ConsumerState<PlannerPage> {
   DateTime _focusedDay = DateTime.now();
   late DateTime _weekStartDay = _weekStart(DateTime.now());
+  _PlannerView _view = _PlannerView.week;
+
+  void _selectDay(DateTime sel) => setState(() {
+        _focusedDay = sel;
+        _weekStartDay = _weekStart(sel);
+      });
 
   @override
   Widget build(BuildContext context) {
     return PageBody(
       title: 'Planner',
-      subtitle: 'Drag a to-do onto a day, then slide it to block out time.',
+      subtitle: _view == _PlannerView.week
+          ? 'Drag a to-do onto a day, then slide it to block out time.'
+          : 'Your month at a glance — tap a day to see and edit its events.',
       scrollable: false,
       actions: [
         SoftButton(
-          label: 'This week',
+          label: 'Today',
           icon: Icons.today_rounded,
-          onTap: () => setState(() {
-            _focusedDay = DateTime.now();
-            _weekStartDay = _weekStart(DateTime.now());
-          }),
+          onTap: () => _selectDay(DateTime.now()),
+        ),
+        const SizedBox(width: 8),
+        _ViewToggle(
+          view: _view,
+          onChanged: (v) => setState(() => _view = v),
+        ),
+        const SizedBox(width: 8),
+        SoftButton(
+          label: 'New event',
+          icon: Icons.event_rounded,
+          onTap: () async {
+            final e =
+                await showEventDialog(context, initialDate: _focusedDay);
+            if (e != null) ref.read(eventsProvider.notifier).upsert(e);
+          },
         ),
         const SizedBox(width: 8),
         SoftButton(
@@ -66,24 +181,25 @@ class _PlannerPageState extends ConsumerState<PlannerPage> {
       child: Expanded(
         child: LayoutBuilder(builder: (context, c) {
           final narrow = c.maxWidth < 980;
-          final side = _SidePanel(
-            focusedDay: _focusedDay,
-            // When narrow the whole page scrolls, so the panel must not
-            // introduce its own (unbounded) scroll view inside it.
-            scroll: !narrow,
-            onDaySelected: (sel) => setState(() {
-              _focusedDay = sel;
-              _weekStartDay = _weekStart(sel);
-            }),
-          );
-          final week = _WeekView(weekStart: _weekStartDay);
+          // When narrow the whole page scrolls, so the panel must not
+          // introduce its own (unbounded) scroll view inside it.
+          final side = _SidePanel(scroll: !narrow);
+          final Widget main = _view == _PlannerView.week
+              ? _WeekView(weekStart: _weekStartDay)
+              : _MonthView(
+                  focusedDay: _focusedDay,
+                  onDaySelected: _selectDay,
+                );
           if (narrow) {
             return SingleChildScrollView(
               child: Column(
                 children: [
                   side,
                   const SizedBox(height: 16),
-                  SizedBox(height: 560, child: week),
+                  SizedBox(
+                    height: _view == _PlannerView.week ? 560 : 660,
+                    child: main,
+                  ),
                 ],
               ),
             );
@@ -93,7 +209,7 @@ class _PlannerPageState extends ConsumerState<PlannerPage> {
             children: [
               SizedBox(width: 320, child: side),
               const SizedBox(width: 16),
-              Expanded(child: week),
+              Expanded(child: main),
             ],
           );
         }),
@@ -102,19 +218,68 @@ class _PlannerPageState extends ConsumerState<PlannerPage> {
   }
 }
 
+/// Compact Week ⇄ Month segmented control for the planner header.
+class _ViewToggle extends StatelessWidget {
+  const _ViewToggle({required this.view, required this.onChanged});
+
+  final _PlannerView view;
+  final ValueChanged<_PlannerView> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget seg(String label, IconData icon, _PlannerView v) {
+      final sel = view == v;
+      final fg =
+          sel ? const Color(0xFF15132B) : AppPalette.textSecondary;
+      return GestureDetector(
+        onTap: () => onChanged(v),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: sel ? AppPalette.accent : Colors.transparent,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: fg),
+              const SizedBox(width: 6),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: fg)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: AppPalette.glassStroke),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          seg('Week', Icons.view_week_rounded, _PlannerView.week),
+          seg('Month', Icons.calendar_month_rounded, _PlannerView.month),
+        ],
+      ),
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Left: month calendar + draggable unscheduled assignments
+// Left: draggable unscheduled to-dos / assignments backlog
 // ---------------------------------------------------------------------------
 
 class _SidePanel extends ConsumerWidget {
-  const _SidePanel({
-    required this.focusedDay,
-    required this.onDaySelected,
-    this.scroll = true,
-  });
+  const _SidePanel({this.scroll = true});
 
-  final DateTime focusedDay;
-  final ValueChanged<DateTime> onDaySelected;
   final bool scroll;
 
   @override
@@ -123,73 +288,20 @@ class _SidePanel extends ConsumerWidget {
     final courses = ref.watch(coursesByIdProvider);
     final folders = ref.watch(foldersProvider);
 
-    Color colorFor(TaskItem t) {
-      var courseId = t.courseId;
-      TaskFolder? folder;
-      for (final f in folders) {
-        if (f.id == t.folderId) folder = f;
-      }
-      courseId ??= folder?.courseId;
-      if (courseId != null && courses[courseId] != null) {
-        return courses[courseId]!.color;
-      }
-      return folder?.color ?? AppPalette.lavender;
-    }
+    Color colorFor(TaskItem t) => taskColor(t, courses, folders);
 
-    final content = Column(
-      children: [
-          GlassContainer(
-            padding: const EdgeInsets.all(12),
-            child: TableCalendar(
-              firstDay: DateTime.utc(2020),
-              lastDay: DateTime.utc(2100),
-              focusedDay: focusedDay,
-              startingDayOfWeek: StartingDayOfWeek.sunday,
-              selectedDayPredicate: (d) => isSameDay(d, focusedDay),
-              onDaySelected: (sel, foc) => onDaySelected(sel),
-              headerStyle: const HeaderStyle(
-                formatButtonVisible: false,
-                titleCentered: true,
-                titleTextStyle: TextStyle(
-                    fontSize: 15, fontWeight: FontWeight.w700),
-              ),
-              daysOfWeekStyle: const DaysOfWeekStyle(
-                weekdayStyle: TextStyle(color: AppPalette.textSecondary),
-                weekendStyle: TextStyle(color: AppPalette.lavender),
-              ),
-              calendarStyle: CalendarStyle(
-                defaultTextStyle:
-                    const TextStyle(color: AppPalette.textPrimary),
-                weekendTextStyle:
-                    const TextStyle(color: AppPalette.textSecondary),
-                outsideTextStyle:
-                    const TextStyle(color: AppPalette.textFaint),
-                todayDecoration: BoxDecoration(
-                  color: AppPalette.mint.withValues(alpha: 0.3),
-                  shape: BoxShape.circle,
-                ),
-                selectedDecoration: const BoxDecoration(
-                  color: AppPalette.accent,
-                  shape: BoxShape.circle,
-                ),
-              ),
+    final content = GlassCard(
+      title: 'To-do to schedule',
+      icon: Icons.drag_indicator_rounded,
+      child: tasks.isEmpty
+          ? const EmptyHint('Nothing to schedule. 🎈')
+          : Column(
+              children: [
+                for (final t in tasks)
+                  _TaskChip(task: t, color: colorFor(t)),
+              ],
             ),
-          ),
-          const SizedBox(height: 16),
-          GlassCard(
-            title: 'To-do to schedule',
-            icon: Icons.drag_indicator_rounded,
-            child: tasks.isEmpty
-                ? const EmptyHint('Nothing to schedule. 🎈')
-                : Column(
-                    children: [
-                      for (final t in tasks)
-                        _TaskChip(task: t, color: colorFor(t)),
-                    ],
-                  ),
-          ),
-        ],
-      );
+    );
 
     return scroll ? SingleChildScrollView(child: content) : content;
   }
@@ -252,7 +364,236 @@ class _TaskChip extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Right: Sunday→Saturday week grid with drop targets and resizable blocks
+// Right (Month view): full month calendar + selected-day agenda. Events can
+// be created, edited and deleted right here; tasks open their editor.
+// ---------------------------------------------------------------------------
+
+class _MonthView extends ConsumerWidget {
+  const _MonthView({required this.focusedDay, required this.onDaySelected});
+
+  final DateTime focusedDay;
+  final ValueChanged<DateTime> onDaySelected;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final days = _buildDayMap(ref);
+    final selected = days[_dayKey(focusedDay)] ?? const <_Agenda>[];
+    final courses = ref.watch(coursesProvider);
+    final folders = ref.watch(foldersProvider);
+    final theme = Theme.of(context);
+
+    // The whole view scrolls as one: the calendar keeps its natural height
+    // and the agenda flows under it, so a short window scrolls instead of
+    // squeezing the agenda card past its minimum (which overflowed).
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          GlassContainer(
+            padding: const EdgeInsets.all(12),
+            child: TableCalendar<_Agenda>(
+            firstDay: DateTime.utc(2020),
+            lastDay: DateTime.utc(2100),
+            focusedDay: focusedDay,
+            rowHeight: 54,
+            startingDayOfWeek: StartingDayOfWeek.sunday,
+            selectedDayPredicate: (d) => isSameDay(d, focusedDay),
+            onDaySelected: (sel, foc) => onDaySelected(sel),
+            eventLoader: (d) => days[_dayKey(d)] ?? const <_Agenda>[],
+            calendarBuilders: _markerBuilders(),
+            headerStyle: const HeaderStyle(
+              formatButtonVisible: false,
+              titleCentered: true,
+              titleTextStyle:
+                  TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            daysOfWeekStyle: const DaysOfWeekStyle(
+              weekdayStyle: TextStyle(color: AppPalette.textSecondary),
+              weekendStyle: TextStyle(color: AppPalette.lavender),
+            ),
+            calendarStyle: CalendarStyle(
+              markersMaxCount: 4,
+              defaultTextStyle:
+                  const TextStyle(color: AppPalette.textPrimary),
+              weekendTextStyle:
+                  const TextStyle(color: AppPalette.textSecondary),
+              outsideTextStyle:
+                  const TextStyle(color: AppPalette.textFaint),
+              todayDecoration: BoxDecoration(
+                color: AppPalette.mint.withValues(alpha: 0.3),
+                shape: BoxShape.circle,
+              ),
+              selectedDecoration: const BoxDecoration(
+                color: AppPalette.accent,
+                shape: BoxShape.circle,
+              ),
+            ),
+          ),
+        ),
+          const SizedBox(height: 16),
+          GlassContainer(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.event_note_rounded,
+                        size: 18, color: AppPalette.lavender),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        relativeDay(focusedDay),
+                        style: theme.textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    SoftButton(
+                      label: 'New event',
+                      icon: Icons.event_rounded,
+                      onTap: () async {
+                        final e = await showEventDialog(context,
+                            initialDate: focusedDay);
+                        if (e != null) {
+                          ref.read(eventsProvider.notifier).upsert(e);
+                        }
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                if (selected.isEmpty)
+                  const EmptyHint('Nothing scheduled this day.')
+                else
+                  for (final a in selected)
+                    _AgendaRow(
+                      agenda: a,
+                      courses: courses,
+                      folders: folders,
+                    ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One row in the month view's day agenda. Events are editable/deletable
+/// inline; tasks open the task editor.
+class _AgendaRow extends ConsumerWidget {
+  const _AgendaRow({
+    required this.agenda,
+    required this.courses,
+    required this.folders,
+  });
+
+  final _Agenda agenda;
+  final List<Course> courses;
+  final List<TaskFolder> folders;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final a = agenda;
+
+    if (a.event != null) {
+      final e = a.event!;
+      final loc = e.location.isEmpty ? '' : ' · ${e.location}';
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            Icon(e.type.icon, color: a.color, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(e.title,
+                      style:
+                          const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(
+                    '${TimeOfDay.fromDateTime(e.start).format(context)} · '
+                    '${e.type.label}$loc',
+                    style: const TextStyle(
+                        fontSize: 12, color: AppPalette.textSecondary),
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: 'Edit event',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.edit_rounded, size: 18),
+              onPressed: () async {
+                final upd = await showEventDialog(context, existing: e);
+                if (upd != null) {
+                  ref.read(eventsProvider.notifier).upsert(upd);
+                }
+              },
+            ),
+            IconButton(
+              tooltip: 'Delete event',
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.delete_outline_rounded, size: 18),
+              onPressed: () async {
+                final ok = await confirmDelete(
+                  context,
+                  title: 'Delete event?',
+                  message: '“${e.title}” will be permanently removed.',
+                );
+                if (ok) ref.read(eventsProvider.notifier).remove(e.id);
+              },
+            ),
+          ],
+        ),
+      );
+    }
+
+    final t = a.task!;
+    return InkWell(
+      onTap: () async {
+        final upd = await showTaskDialog(context,
+            existing: t, folders: folders, courses: courses);
+        if (upd != null) ref.read(tasksProvider.notifier).save(upd);
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          children: [
+            Icon(
+                t.isAssignment
+                    ? Icons.school_rounded
+                    : Icons.flag_outlined,
+                color: a.color,
+                size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(t.title,
+                      style:
+                          const TextStyle(fontWeight: FontWeight.w600)),
+                  Text(t.isAssignment ? 'Assignment due' : 'Task due',
+                      style: const TextStyle(
+                          fontSize: 12,
+                          color: AppPalette.textSecondary)),
+                ],
+              ),
+            ),
+            GlassChip(label: t.priority.label, color: t.priority.color),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Right (Week view): Sunday→Saturday week grid with drop targets + blocks
 // ---------------------------------------------------------------------------
 
 class _WeekView extends ConsumerWidget {

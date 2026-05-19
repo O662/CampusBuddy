@@ -1,71 +1,85 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_palette.dart';
 import '../../core/widgets/glass.dart';
 import '../../core/widgets/ui_kit.dart';
-import '../../data/local_store.dart';
 import '../../data/models.dart';
 import '../../state/app_state.dart';
 
 // ---------------------------------------------------------------------------
-// Sticky note — free-text scratchpad, persisted locally
+// Notes — a compact preview of the Notes board, links to the full page
 // ---------------------------------------------------------------------------
 
-class StickyNoteNotifier extends Notifier<String> {
-  static const _key = 'stickyNote';
-  dynamic get _box => ref.read(localStoreProvider).box(LocalStore.settings);
-
-  @override
-  String build() => (_box.get(_key) as String?) ?? '';
-
-  Future<void> save(String value) async {
-    await _box.put(_key, value);
-    state = value;
+/// First non-empty line of a note, for the dashboard preview.
+String _noteHeadline(Note n) {
+  for (final line in n.body.split('\n')) {
+    final t = line.trim();
+    if (t.isNotEmpty) return t;
   }
+  return 'Empty note';
 }
 
-final stickyNoteProvider =
-    NotifierProvider<StickyNoteNotifier, String>(StickyNoteNotifier.new);
-
-class StickyNoteCard extends ConsumerStatefulWidget {
-  const StickyNoteCard({super.key});
+class NotesPreviewCard extends ConsumerWidget {
+  const NotesPreviewCard({super.key});
 
   @override
-  ConsumerState<StickyNoteCard> createState() => _StickyNoteCardState();
-}
+  Widget build(BuildContext context, WidgetRef ref) {
+    final notes = ref.watch(notesProvider).toList()
+      ..sort((a, b) {
+        final byTime = b.updatedAt.compareTo(a.updatedAt);
+        return byTime != 0 ? byTime : a.id.compareTo(b.id);
+      });
+    final preview = notes.take(4).toList();
 
-class _StickyNoteCardState extends ConsumerState<StickyNoteCard> {
-  late final TextEditingController _c;
-
-  @override
-  void initState() {
-    super.initState();
-    // Seed once from storage; we don't watch the provider here so typing
-    // never rebuilds the field (which would fight the cursor).
-    _c = TextEditingController(text: ref.read(stickyNoteProvider));
-  }
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
     return GlassCard(
-      title: 'Sticky note',
+      title: 'Notes',
       icon: Icons.sticky_note_2_outlined,
-      child: TextField(
-        controller: _c,
-        minLines: 5,
-        maxLines: 9,
-        onChanged: (v) => ref.read(stickyNoteProvider.notifier).save(v),
-        decoration: const InputDecoration(
-          hintText: 'Jot anything here — it saves automatically.',
-        ),
+      trailing: SoftButton(
+        label: 'Open',
+        icon: Icons.open_in_full_rounded,
+        onTap: () => context.go('/notes'),
       ),
+      child: preview.isEmpty
+          ? const EmptyHint('No notes yet — tap Open to start one.')
+          : Column(
+              children: [
+                for (final n in preview)
+                  InkWell(
+                    onTap: () => context.go('/notes'),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 7),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 9,
+                            height: 9,
+                            decoration: BoxDecoration(
+                                color: n.color, shape: BoxShape.circle),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              _noteHeadline(n),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.w500),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (notes.length > preview.length) ...[
+                  const SizedBox(height: 6),
+                  Text('+${notes.length - preview.length} more',
+                      style: const TextStyle(
+                          fontSize: 11, color: AppPalette.textFaint)),
+                ],
+              ],
+            ),
     );
   }
 }

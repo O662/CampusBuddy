@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_palette.dart';
+import '../../core/widgets/adaptive_draggable.dart';
 import '../../core/widgets/glass.dart';
 import '../../core/widgets/entry_dialogs.dart';
 import '../../core/widgets/ui_kit.dart';
@@ -28,15 +30,22 @@ class DashboardPage extends ConsumerWidget {
     return PageBody(
       title: '$greeting, ${profile.name} 👋',
       subtitle: 'Here is everything on your plate today. '
-          'Long-press a card to rearrange your dashboard.',
+          'Drag a card to rearrange (long-press on touch).',
+      actions: [
+        SoftButton(
+          label: 'Customize',
+          icon: Icons.tune_rounded,
+          onTap: () => context.go('/customize'),
+        ),
+      ],
       child: const _ReorderableDashboard(),
     );
   }
 }
 
 /// Resolves a stable card id to its widget. Keep keys in sync with
-/// [kDashboardCardIds].
-const _dashboardCards = <String, Widget>{
+/// [kDashboardCardIds]. Public so the Customize page can preview each card.
+const dashboardCards = <String, Widget>{
   'clock': ClockCard(),
   'weather': WeatherCard(),
   'stats': _StatsStrip(),
@@ -45,7 +54,7 @@ const _dashboardCards = <String, Widget>{
   'overview': TwoWeekOverviewCard(),
   'quickadd': QuickAddCard(),
   'dictionary': DictionaryCard(),
-  'notes': StickyNoteCard(),
+  'notes': NotesPreviewCard(),
   'grades': _GradeProgressCard(),
   'tasks': _TasksCard(),
   'events': _EventsCard(),
@@ -64,6 +73,14 @@ class _ReorderableDashboard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final order = ref.watch(dashboardOrderProvider);
+    final hidden = ref.watch(dashboardHiddenProvider);
+    final visible = [for (final id in order) if (!hidden.contains(id)) id];
+
+    if (visible.isEmpty) {
+      return const EmptyHint(
+        'Every card is hidden. Tap “Customize” above to bring some back.',
+      );
+    }
 
     return LayoutBuilder(
       builder: (context, c) {
@@ -71,20 +88,21 @@ class _ReorderableDashboard extends ConsumerWidget {
         final colWidth =
             (c.maxWidth - _spacing * (cols - 1)) / cols;
 
+        final notifier = ref.read(dashboardOrderProvider.notifier);
         Widget slot(String id) => _DashSlot(
               id: id,
               feedbackWidth: colWidth,
-              onReorder: (moving, target) => ref
-                  .read(dashboardOrderProvider.notifier)
-                  .reorder(moving, target),
-              child: _dashboardCards[id] ?? const SizedBox.shrink(),
+              onBeginDrag: () => notifier.beginDrag(id),
+              onMoveOver: notifier.moveOver,
+              onEndDrag: notifier.endDrag,
+              child: dashboardCards[id] ?? const SizedBox.shrink(),
             );
 
         if (cols == 1) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              for (final id in order)
+              for (final id in visible)
                 Padding(
                   padding: const EdgeInsets.only(bottom: _spacing),
                   child: slot(id),
@@ -94,10 +112,10 @@ class _ReorderableDashboard extends ConsumerWidget {
         }
 
         final buckets = List.generate(cols, (_) => <Widget>[]);
-        for (var i = 0; i < order.length; i++) {
+        for (var i = 0; i < visible.length; i++) {
           buckets[i % cols].add(Padding(
             padding: const EdgeInsets.only(bottom: _spacing),
-            child: slot(order[i]),
+            child: slot(visible[i]),
           ));
         }
         return Row(
@@ -124,23 +142,29 @@ class _DashSlot extends StatelessWidget {
     required this.id,
     required this.child,
     required this.feedbackWidth,
-    required this.onReorder,
+    required this.onBeginDrag,
+    required this.onMoveOver,
+    required this.onEndDrag,
   });
 
   final String id;
   final Widget child;
   final double feedbackWidth;
-  final void Function(String moving, String target) onReorder;
+  final VoidCallback onBeginDrag;
+  final void Function(String target) onMoveOver;
+  final Future<void> Function() onEndDrag;
 
   @override
   Widget build(BuildContext context) {
     return DragTarget<String>(
       onWillAcceptWithDetails: (d) => d.data != id,
-      onAcceptWithDetails: (d) => onReorder(d.data, id),
+      onMove: (_) => onMoveOver(id),
       builder: (context, candidate, rejected) {
         final hovering = candidate.isNotEmpty;
-        return LongPressDraggable<String>(
+        return AdaptiveDraggable<String>(
           data: id,
+          onDragStarted: onBeginDrag,
+          onDragEnd: onEndDrag,
           feedback: Material(
             color: Colors.transparent,
             child: Opacity(

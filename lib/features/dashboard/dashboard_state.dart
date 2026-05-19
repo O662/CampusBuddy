@@ -35,7 +35,7 @@ const kDashboardCardMeta = <String, (String, IconData)>{
   'overview': ('Two-week overview', Icons.calendar_view_week_rounded),
   'quickadd': ('Quick add', Icons.bolt_rounded),
   'dictionary': ('Dictionary', Icons.menu_book_rounded),
-  'notes': ('Sticky note', Icons.sticky_note_2_rounded),
+  'notes': ('Notes', Icons.sticky_note_2_rounded),
   'grades': ('Grade progress', Icons.school_rounded),
   'tasks': ('To-do & assignments', Icons.checklist_rounded),
   'events': ('Upcoming events', Icons.event_available_rounded),

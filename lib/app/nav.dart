@@ -19,9 +19,9 @@ const primaryNav = <NavItem>[
 const secondaryNav = <NavItem>[
   NavItem('/todo', 'To-do', Icons.checklist_rounded),
   NavItem('/timer', 'Timer', Icons.timer_outlined),
-  NavItem('/pomodoro', 'Pomodoro', Icons.av_timer_rounded),
+  NavItem('/notes', 'Notes', Icons.sticky_note_2_rounded),
   NavItem('/grades', 'Grades', Icons.school_rounded),
-  NavItem('/focus', 'Focus', Icons.center_focus_strong_rounded),
+  NavItem('/center', 'Center', Icons.local_florist_rounded),
 ];
 
 const profileNav = NavItem('/profile', 'Profile', Icons.person_rounded);

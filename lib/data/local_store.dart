@@ -16,6 +16,7 @@ class LocalStore {
 
   static const courses = 'courses';
   static const grades = 'grades';
+  static const gradeCategories = 'gradeCategories';
 
   /// Legacy box — assignments were merged into [tasks]. Still opened so the
   /// one-time migration in [_migrateAssignmentsToTasks] can drain it.
@@ -26,11 +27,16 @@ class LocalStore {
   static const events = 'events';
   static const decks = 'decks';
   static const cards = 'cards';
+  static const notes = 'notes';
+  static const institutions = 'institutions';
+  static const semesters = 'semesters';
+  static const pastCourses = 'pastCourses';
   static const settings = 'settings';
 
   static const _boxNames = [
     courses,
     grades,
+    gradeCategories,
     assignments,
     tasks,
     folders,
@@ -38,6 +44,10 @@ class LocalStore {
     events,
     decks,
     cards,
+    notes,
+    institutions,
+    semesters,
+    pastCourses,
     settings,
   ];
 
@@ -58,6 +68,8 @@ class LocalStore {
     final store = LocalStore._();
     await store._seedIfFirstRun();
     await store._migrateAssignmentsToTasks();
+    await store._migrateStickyNoteToNotes();
+    await store._migrateCoursesToInstitution();
     return store;
   }
 
@@ -278,5 +290,59 @@ class LocalStore {
     }
     await legacy.clear();
     await s.put('assignmentsMerged', true);
+  }
+
+  /// One-time, idempotent: lift the legacy single sticky-note string (kept
+  /// under `settings/stickyNote`) into the multi-note `notes` box, then drop
+  /// the old key so the Notes board is the sole owner from then on.
+  Future<void> _migrateStickyNoteToNotes() async {
+    final s = box(settings);
+    if (s.get('stickyNoteMigrated') == true) return;
+
+    final legacy = (s.get('stickyNote') as String?)?.trim() ?? '';
+    if (legacy.isNotEmpty) {
+      final note = Note(id: newId(), body: legacy, updatedAt: DateTime.now());
+      await box(notes).put(note.id, note.toJson());
+    }
+    await s.delete('stickyNote');
+    await s.put('stickyNoteMigrated', true);
+  }
+
+  /// One-time, idempotent: every live course must belong to an institution
+  /// (its grading system drives how the grade is shown). Ensures at least
+  /// one institution exists, then files any institution-less course under
+  /// the first one. The user can re-assign via the course editor.
+  Future<void> _migrateCoursesToInstitution() async {
+    final s = box(settings);
+    if (s.get('coursesInstitutionAssigned') == true) return;
+
+    final coursesBox = box(courses);
+    final needsAssign = coursesBox.values
+        .whereType<Map>()
+        .where((m) => (m['institutionId'] as String?) == null)
+        .toList();
+    if (needsAssign.isEmpty) {
+      await s.put('coursesInstitutionAssigned', true);
+      return;
+    }
+
+    final instBox = box(institutions);
+    String defaultId;
+    final existing = instBox.values.whereType<Map>().toList();
+    if (existing.isEmpty) {
+      final school = readProfile().school.trim();
+      final inst = Institution(
+          id: newId(), name: school.isEmpty ? 'My University' : school);
+      await instBox.put(inst.id, inst.toJson());
+      defaultId = inst.id;
+    } else {
+      defaultId = existing.first['id'] as String;
+    }
+
+    for (final raw in needsAssign) {
+      final course = Course.fromJson(raw).copyWith(institutionId: defaultId);
+      await coursesBox.put(course.id, course.toJson());
+    }
+    await s.put('coursesInstitutionAssigned', true);
   }
 }

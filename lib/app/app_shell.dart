@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/theme/app_palette.dart';
+import '../core/widgets/adaptive_draggable.dart';
 import '../core/widgets/animated_gradient_background.dart';
 import '../core/widgets/glass.dart';
 import 'nav.dart';
@@ -10,8 +11,9 @@ import 'nav_state.dart';
 
 /// The persistent app frame: animated gradient backdrop, a glass vertical
 /// rail on the left (primary menu) and a glass top bar holding the secondary
-/// menu, right-aligned. Both menus are long-press draggable to reorder, and
-/// the order is saved. The routed page renders in the large glass area.
+/// menu, right-aligned. Both menus are draggable to reorder (click-drag on
+/// mouse, long-press on touch) and the order is saved. The routed page
+/// renders in the large glass area.
 class AppShell extends StatelessWidget {
   const AppShell({super.key, required this.child});
 
@@ -294,9 +296,11 @@ class _PillButton extends StatelessWidget {
   }
 }
 
-/// Wraps each item in a long-press [Draggable] + [DragTarget] so the menu
-/// can be reordered. Dropping a dragged item onto another swaps its position
-/// via [NavOrderNotifier.reorder], which persists the new order.
+/// Wraps each item in an [AdaptiveDraggable] + [DragTarget] so the menu can
+/// be reordered (mouse = click-drag, touch = long-press; a plain click
+/// falls straight through to the button — no gesture-arena lag). Dropping a
+/// dragged item onto another swaps its position via [NavOrderNotifier.reorder],
+/// which persists the new order.
 class _ReorderableMenu extends ConsumerWidget {
   const _ReorderableMenu({
     required this.items,
@@ -336,9 +340,8 @@ class _ReorderableMenu extends ConsumerWidget {
           ),
       builder: (context, candidate, rejected) {
         final hovering = candidate.isNotEmpty;
-        return LongPressDraggable<NavItem>(
+        return AdaptiveDraggable<NavItem>(
           data: item,
-          axis: axis,
           feedback: Material(
             color: Colors.transparent,
             child: Opacity(
