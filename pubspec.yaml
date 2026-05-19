@@ -39,6 +39,7 @@ dependencies:
   hive_ce: ^2.19.3
   hive_ce_flutter: ^2.3.4
   window_manager: ^0.5.1
+  desktop_multi_window: ^0.3.0
   google_fonts: ^8.1.0
   table_calendar: ^3.2.0
   intl: ^0.20.2

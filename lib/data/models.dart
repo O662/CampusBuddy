@@ -1109,40 +1109,77 @@ class PastCourse {
 }
 
 /// A free-text sticky note on the Notes board. Auto-saved as the user
-/// types; [updatedAt] drives most-recent-first ordering.
+/// types. [order] is the manual drag-to-reorder position (ascending);
+/// legacy notes default to 0 and fall back to [updatedAt] ordering.
 class Note {
   const Note({
     required this.id,
+    this.title = '',
     this.body = '',
     this.colorSeed = 0,
+    this.favorite = false,
+    this.tags = const [],
+    this.order = 0,
     required this.updatedAt,
   });
 
   final String id;
+  final String title;
   final String body;
   final int colorSeed;
+  final bool favorite;
+
+  /// Free-text labels for grouping/filtering on the board.
+  final List<String> tags;
+
+  /// Manual sort position on the board (drag-to-reorder).
+  final int order;
   final DateTime updatedAt;
 
   Color get color => AppPalette.swatchFor(colorSeed);
 
-  Note copyWith({String? body, int? colorSeed, DateTime? updatedAt}) => Note(
+  Note copyWith({
+    String? title,
+    String? body,
+    int? colorSeed,
+    bool? favorite,
+    List<String>? tags,
+    int? order,
+    DateTime? updatedAt,
+  }) =>
+      Note(
         id: id,
+        title: title ?? this.title,
         body: body ?? this.body,
         colorSeed: colorSeed ?? this.colorSeed,
+        favorite: favorite ?? this.favorite,
+        tags: tags ?? this.tags,
+        order: order ?? this.order,
         updatedAt: updatedAt ?? this.updatedAt,
       );
 
   Map<String, dynamic> toJson() => {
         'id': id,
+        'title': title,
         'body': body,
         'colorSeed': colorSeed,
+        'favorite': favorite,
+        'tags': tags,
+        'order': order,
         'updatedAt': updatedAt.millisecondsSinceEpoch,
       };
 
   factory Note.fromJson(Map json) => Note(
         id: json['id'] as String,
+        title: json['title'] as String? ?? '',
         body: json['body'] as String? ?? '',
         colorSeed: (json['colorSeed'] as num?)?.toInt() ?? 0,
+        favorite: json['favorite'] as bool? ?? false,
+        tags: (json['tags'] as List?)
+                ?.map((e) => e.toString())
+                .toList() ??
+            const [],
+        order: (json['order'] as num?)?.toInt() ?? 0,
         updatedAt: json['updatedAt'] == null
             ? DateTime.fromMillisecondsSinceEpoch(0)
             : DateTime.fromMillisecondsSinceEpoch(json['updatedAt'] as int),

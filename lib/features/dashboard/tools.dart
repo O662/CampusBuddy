@@ -4,16 +4,21 @@ import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_palette.dart';
 import '../../core/widgets/glass.dart';
+import '../../core/widgets/note_editing.dart';
 import '../../core/widgets/ui_kit.dart';
+import '../../data/local_store.dart';
 import '../../data/models.dart';
 import '../../state/app_state.dart';
+import '../notes/note_window_bridge.dart';
 
 // ---------------------------------------------------------------------------
 // Notes — a compact preview of the Notes board, links to the full page
 // ---------------------------------------------------------------------------
 
-/// First non-empty line of a note, for the dashboard preview.
+/// One-line label for a note in the dashboard preview: its title, else
+/// the first non-empty body line.
 String _noteHeadline(Note n) {
+  if (n.title.trim().isNotEmpty) return n.title.trim();
   for (final line in n.body.split('\n')) {
     final t = line.trim();
     if (t.isNotEmpty) return t;
@@ -21,65 +26,365 @@ String _noteHeadline(Note n) {
   return 'Empty note';
 }
 
-class NotesPreviewCard extends ConsumerWidget {
+class NotesPreviewCard extends ConsumerStatefulWidget {
   const NotesPreviewCard({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<NotesPreviewCard> createState() => _NotesPreviewCardState();
+}
+
+class _NotesPreviewCardState extends ConsumerState<NotesPreviewCard> {
+  final _titleC = TextEditingController();
+  final _bodyC = TextEditingController();
+
+  /// Id of the note currently being composed inline. The note is created
+  /// up-front and every edit auto-saves, so progress is never lost — even
+  /// if the user forgets to close the composer.
+  String? _draftId;
+
+  @override
+  void dispose() {
+    // A draft left completely empty is just noise — clean it up. A draft
+    // with any content stays saved (that's the whole point).
+    final id = _draftId;
+    if (id != null) {
+      final note = _find(ref.read(notesProvider), id);
+      if (note != null && _isEmpty(note)) {
+        ref.read(notesProvider.notifier).remove(id);
+      }
+    }
+    _titleC.dispose();
+    _bodyC.dispose();
+    super.dispose();
+  }
+
+  Note? _find(List<Note> all, String? id) {
+    if (id == null) return null;
+    for (final n in all) {
+      if (n.id == id) return n;
+    }
+    return null;
+  }
+
+  bool _isEmpty(Note n) =>
+      n.title.trim().isEmpty && n.body.trim().isEmpty && n.tags.isEmpty;
+
+  void _save(Note next) =>
+      ref.read(notesProvider.notifier).upsert(next);
+
+  void _startNew() {
+    final all = ref.read(notesProvider);
+    // New note goes to the top of the board (same as the Notes page).
+    final order = all.isEmpty
+        ? 0
+        : all.map((n) => n.order).reduce((a, b) => a < b ? a : b) - 1;
+    final note =
+        Note(id: newId(), order: order, updatedAt: DateTime.now());
+    _save(note);
+    _titleC.clear();
+    _bodyC.clear();
+    setState(() => _draftId = note.id);
+  }
+
+  void _finish() {
+    final id = _draftId;
+    if (id != null) {
+      final note = _find(ref.read(notesProvider), id);
+      if (note != null && _isEmpty(note)) {
+        ref.read(notesProvider.notifier).remove(id);
+      }
+    }
+    _titleC.clear();
+    _bodyC.clear();
+    setState(() => _draftId = null);
+  }
+
+  void _discard() {
+    final id = _draftId;
+    if (id != null) ref.read(notesProvider.notifier).remove(id);
+    _titleC.clear();
+    _bodyC.clear();
+    setState(() => _draftId = null);
+  }
+
+  Future<void> _pickColor(Note note) async {
+    final picked = await showNoteColorPicker(context, note.colorSeed);
+    if (picked != null) {
+      _save(note.copyWith(colorSeed: picked, updatedAt: DateTime.now()));
+    }
+  }
+
+  Future<void> _addTag(Note note) async {
+    final onNote = note.tags.map((t) => t.toLowerCase()).toSet();
+    final suggestions = <String, String>{};
+    for (final n in ref.read(notesProvider)) {
+      for (final t in n.tags) {
+        final k = t.toLowerCase();
+        if (!onNote.contains(k)) suggestions.putIfAbsent(k, () => t);
+      }
+    }
+    final entered =
+        await showAddTagDialog(context, suggestions: suggestions.values);
+    final tag = entered?.trim() ?? '';
+    if (tag.isEmpty) return;
+    if (note.tags.any((e) => e.toLowerCase() == tag.toLowerCase())) return;
+    _save(note.copyWith(
+        tags: [...note.tags, tag], updatedAt: DateTime.now()));
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final notes = ref.watch(notesProvider).toList()
       ..sort((a, b) {
         final byTime = b.updatedAt.compareTo(a.updatedAt);
         return byTime != 0 ? byTime : a.id.compareTo(b.id);
       });
-    final preview = notes.take(4).toList();
+    final draft = _find(notes, _draftId);
+    // The draft is shown in the composer, so keep it out of the list.
+    final preview =
+        notes.where((n) => n.id != _draftId).take(4).toList();
 
     return GlassCard(
       title: 'Notes',
       icon: Icons.sticky_note_2_outlined,
-      trailing: SoftButton(
-        label: 'Open',
-        icon: Icons.open_in_full_rounded,
-        onTap: () => context.go('/notes'),
-      ),
-      child: preview.isEmpty
-          ? const EmptyHint('No notes yet — tap Open to start one.')
-          : Column(
-              children: [
-                for (final n in preview)
-                  InkWell(
-                    onTap: () => context.go('/notes'),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 7),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 9,
-                            height: 9,
-                            decoration: BoxDecoration(
-                                color: n.color, shape: BoxShape.circle),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              _noteHeadline(n),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style:
-                                  const TextStyle(fontWeight: FontWeight.w500),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                if (notes.length > preview.length) ...[
-                  const SizedBox(height: 6),
-                  Text('+${notes.length - preview.length} more',
-                      style: const TextStyle(
-                          fontSize: 11, color: AppPalette.textFaint)),
-                ],
-              ],
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (draft == null) ...[
+            SoftButton(
+              label: 'New',
+              icon: Icons.add_rounded,
+              filled: true,
+              onTap: _startNew,
             ),
+            const SizedBox(width: 8),
+          ],
+          SoftButton(
+            label: 'Open',
+            icon: Icons.open_in_full_rounded,
+            onTap: () => context.go('/notes'),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (draft != null) ...[
+            _Composer(
+              note: draft,
+              titleC: _titleC,
+              bodyC: _bodyC,
+              onTitleChanged: (v) => _save(
+                  draft.copyWith(title: v, updatedAt: DateTime.now())),
+              onBodyChanged: (v) => _save(
+                  draft.copyWith(body: v, updatedAt: DateTime.now())),
+              onPickColor: () => _pickColor(draft),
+              onToggleFavorite: () => _save(draft.copyWith(
+                  favorite: !draft.favorite,
+                  updatedAt: DateTime.now())),
+              onAddTag: () => _addTag(draft),
+              onRemoveTag: (t) => _save(draft.copyWith(
+                  tags: draft.tags.where((e) => e != t).toList(),
+                  updatedAt: DateTime.now())),
+              onPopOut: () => popOutNote(context, draft.id),
+              onDiscard: _discard,
+              onDone: _finish,
+            ),
+            const SizedBox(height: 14),
+          ],
+          if (preview.isEmpty && draft == null)
+            const EmptyHint('No notes yet — tap New to start one.')
+          else
+            for (final n in preview)
+              InkWell(
+                onTap: () => context.go('/notes'),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 9,
+                        height: 9,
+                        decoration: BoxDecoration(
+                            color: n.color, shape: BoxShape.circle),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          _noteHeadline(n),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style:
+                              const TextStyle(fontWeight: FontWeight.w500),
+                        ),
+                      ),
+                      if (n.favorite) ...[
+                        const SizedBox(width: 6),
+                        const Icon(Icons.star_rounded,
+                            size: 14, color: AppPalette.warning),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+          if (notes.length > preview.length + (draft == null ? 0 : 1)) ...[
+            const SizedBox(height: 6),
+            Text(
+                '+${notes.length - preview.length - (draft == null ? 0 : 1)} more',
+                style: const TextStyle(
+                    fontSize: 11, color: AppPalette.textFaint)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The inline note editor shown inside the dashboard Notes card. Bound to
+/// a real note — every change auto-saves through the callbacks.
+class _Composer extends StatelessWidget {
+  const _Composer({
+    required this.note,
+    required this.titleC,
+    required this.bodyC,
+    required this.onTitleChanged,
+    required this.onBodyChanged,
+    required this.onPickColor,
+    required this.onToggleFavorite,
+    required this.onAddTag,
+    required this.onRemoveTag,
+    required this.onPopOut,
+    required this.onDiscard,
+    required this.onDone,
+  });
+
+  final Note note;
+  final TextEditingController titleC;
+  final TextEditingController bodyC;
+  final ValueChanged<String> onTitleChanged;
+  final ValueChanged<String> onBodyChanged;
+  final VoidCallback onPickColor;
+  final VoidCallback onToggleFavorite;
+  final VoidCallback onAddTag;
+  final ValueChanged<String> onRemoveTag;
+  final VoidCallback onPopOut;
+  final VoidCallback onDiscard;
+  final VoidCallback onDone;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppPalette.glassStroke),
+        color: Colors.white.withValues(alpha: 0.04),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              GestureDetector(
+                onTap: onPickColor,
+                child: Container(
+                  width: 20,
+                  height: 20,
+                  decoration: BoxDecoration(
+                    color: note.color,
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.3)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: TextField(
+                  controller: titleC,
+                  autofocus: true,
+                  onChanged: onTitleChanged,
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w700),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: InputBorder.none,
+                    hintText: 'Title',
+                  ),
+                ),
+              ),
+              InkWell(
+                onTap: onToggleFavorite,
+                borderRadius: BorderRadius.circular(999),
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Icon(
+                    note.favorite
+                        ? Icons.star_rounded
+                        : Icons.star_border_rounded,
+                    size: 20,
+                    color: AppPalette.warning,
+                  ),
+                ),
+              ),
+              InkWell(
+                onTap: onPopOut,
+                borderRadius: BorderRadius.circular(999),
+                child: const Padding(
+                  padding: EdgeInsets.all(4),
+                  child: Tooltip(
+                    message: 'Pop out',
+                    child: Icon(Icons.open_in_new_rounded,
+                        size: 18, color: AppPalette.textSecondary),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          TextField(
+            controller: bodyC,
+            minLines: 2,
+            maxLines: 6,
+            onChanged: onBodyChanged,
+            decoration: const InputDecoration(
+              border: InputBorder.none,
+              hintText: 'Jot anything here…',
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              for (final t in note.tags)
+                TagChip(label: t, onRemove: () => onRemoveTag(t)),
+              AddTagButton(onTap: onAddTag),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              const Icon(Icons.cloud_done_rounded,
+                  size: 14, color: AppPalette.textFaint),
+              const SizedBox(width: 5),
+              const Text('Saved automatically',
+                  style: TextStyle(
+                      fontSize: 11, color: AppPalette.textFaint)),
+              const Spacer(),
+              TextButton(
+                onPressed: onDiscard,
+                style: TextButton.styleFrom(
+                    foregroundColor: AppPalette.danger),
+                child: const Text('Discard'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton(onPressed: onDone, child: const Text('Done')),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

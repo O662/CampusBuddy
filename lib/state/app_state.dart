@@ -257,6 +257,12 @@ class NoteNotifier extends CollectionNotifier<Note> {
   Map<String, dynamic> encode(Note i) => i.toJson();
   @override
   Note decode(Map j) => Note.fromJson(j);
+
+  /// Persists a new manual order. [ordered] is the full notes list in its
+  /// new top-to-bottom sequence; positions are renumbered 0..n.
+  Future<void> reorder(List<Note> ordered) => upsertAll([
+        for (var i = 0; i < ordered.length; i++) ordered[i].copyWith(order: i),
+      ]);
 }
 
 class InstitutionNotifier extends CollectionNotifier<Institution> {

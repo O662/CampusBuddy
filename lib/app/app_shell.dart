@@ -76,8 +76,8 @@ class _LeftRail extends ConsumerWidget {
     final primary = ref.watch(navOrderProvider).primary;
 
     return GlassContainer(
-      width: compact ? 86 : 164,
-      padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 14),
+      width: compact ? 65 : 123,
+      padding: EdgeInsets.symmetric(vertical: 20, horizontal: compact ? 9 : 14),
       borderRadius: 28,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -347,7 +347,7 @@ class _ReorderableMenu extends ConsumerWidget {
             child: Opacity(
               opacity: 0.92,
               child: SizedBox(
-                width: axis == Axis.vertical ? 136 : null,
+                width: axis == Axis.vertical ? 102 : null,
                 child: content,
               ),
             ),

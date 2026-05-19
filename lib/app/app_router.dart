@@ -6,6 +6,7 @@ import '../features/dashboard/customize_page.dart';
 import '../features/dashboard/dashboard_page.dart';
 import '../features/grades/course_detail_page.dart';
 import '../features/grades/grades_page.dart';
+import '../features/notes/note_popout_page.dart';
 import '../features/notes/notes_page.dart';
 import '../features/planner/planner_page.dart';
 import '../features/profile/profile_page.dart';
@@ -91,6 +92,13 @@ final appRouter = GoRouter(
     GoRoute(
       path: '/focus',
       redirect: (context, state) => '/center',
+    ),
+    // A single note popped out into a compact, always-on-top window.
+    // Outside the shell so it fills the (shrunken) window on its own.
+    GoRoute(
+      path: '/note/:id',
+      pageBuilder: (context, state) =>
+          _fade(NotePopoutPage(noteId: state.pathParameters['id']!)),
     ),
   ],
 );

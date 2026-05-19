@@ -18,7 +18,13 @@
       "PowerShell(flutter analyze *)",
       "Bash(rm \"lib/features/pomodoro/pomodoro_page.dart\")",
       "Bash(rmdir \"lib/features/pomodoro\")",
-      "Bash(git -C \"C:/Users/Build/OneDrive/Documents/GitHub/CampusBuddy\" rm -q -- lib/features/focus/focus_page.dart)"
+      "Bash(git -C \"C:/Users/Build/OneDrive/Documents/GitHub/CampusBuddy\" rm -q -- lib/features/focus/focus_page.dart)",
+      "WebFetch(domain:pub.dev)",
+      "Read(//c/Users/Build/AppData/Local/Pub/Cache/hosted/pub.dev/**)",
+      "Bash(ls -d window_manager*)",
+      "Bash(ls window_manager-*/windows/)",
+      "Bash(ls -d android ios linux macos web windows)",
+      "Bash(cat windows/flutter/generated_plugins.cmake)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Build\\.claude\\projects\\c--Users-Build-OneDrive-Documents-GitHub-CampusBuddy\\memory"
