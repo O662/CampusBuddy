@@ -1186,6 +1186,273 @@ class Note {
       );
 }
 
+/// A user-created countdown timer on the Timer board. State is derived from
+/// two persisted nullable fields so the same timer ticks identically in the
+/// main window and any pop-out (each just recomputes against the wall clock):
+///
+/// * **idle**   — [endsAt] null, [pausedRemaining] null → shows [durationSeconds]
+/// * **running**— [endsAt] set → shows max(0, endsAt − now)
+/// * **paused** — [endsAt] null, [pausedRemaining] set → shows [pausedRemaining]
+/// * **finished**— running and now ≥ [endsAt] → 00:00, alarms until dismissed
+class TimerItem {
+  const TimerItem({
+    required this.id,
+    this.name = '',
+    required this.durationSeconds,
+    this.colorSeed = 0,
+    this.order = 0,
+    this.endsAt,
+    this.pausedRemaining,
+    required this.updatedAt,
+  });
+
+  final String id;
+  final String name;
+
+  /// The configured length the timer resets to.
+  final int durationSeconds;
+  final int colorSeed;
+
+  /// Manual sort position on the board (drag-to-reorder).
+  final int order;
+
+  /// Wall-clock instant this timer fires. Non-null **iff** running.
+  final DateTime? endsAt;
+
+  /// Seconds left when paused mid-run. Non-null **iff** paused.
+  final int? pausedRemaining;
+  final DateTime updatedAt;
+
+  Color get color => AppPalette.swatchFor(colorSeed);
+
+  bool get isRunning => endsAt != null;
+  bool get isPaused => endsAt == null && pausedRemaining != null;
+  bool get isIdle => endsAt == null && pausedRemaining == null;
+
+  /// Seconds remaining right now (never negative).
+  int get remainingSeconds {
+    if (endsAt != null) {
+      final s = endsAt!.difference(DateTime.now()).inSeconds;
+      return s < 0 ? 0 : s;
+    }
+    return pausedRemaining ?? durationSeconds;
+  }
+
+  /// Running but the deadline has passed — it's ringing.
+  bool get isFinished => endsAt != null && !endsAt!.isAfter(DateTime.now());
+
+  TimerItem copyWith({
+    String? name,
+    int? durationSeconds,
+    int? colorSeed,
+    int? order,
+    DateTime? endsAt,
+    bool clearEndsAt = false,
+    int? pausedRemaining,
+    bool clearPausedRemaining = false,
+    DateTime? updatedAt,
+  }) =>
+      TimerItem(
+        id: id,
+        name: name ?? this.name,
+        durationSeconds: durationSeconds ?? this.durationSeconds,
+        colorSeed: colorSeed ?? this.colorSeed,
+        order: order ?? this.order,
+        endsAt: clearEndsAt ? null : (endsAt ?? this.endsAt),
+        pausedRemaining: clearPausedRemaining
+            ? null
+            : (pausedRemaining ?? this.pausedRemaining),
+        updatedAt: updatedAt ?? this.updatedAt,
+      );
+
+  /// Begin (or resume) counting down from the current remaining time.
+  TimerItem started() => copyWith(
+        endsAt: DateTime.now().add(Duration(seconds: remainingSeconds)),
+        clearPausedRemaining: true,
+        updatedAt: DateTime.now(),
+      );
+
+  /// Freeze at the current remaining time.
+  TimerItem paused() => copyWith(
+        clearEndsAt: true,
+        pausedRemaining: remainingSeconds,
+        updatedAt: DateTime.now(),
+      );
+
+  /// Back to a fresh, stopped full duration ("start over").
+  TimerItem resetToFull() => copyWith(
+        clearEndsAt: true,
+        clearPausedRemaining: true,
+        updatedAt: DateTime.now(),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'durationSeconds': durationSeconds,
+        'colorSeed': colorSeed,
+        'order': order,
+        'endsAt': endsAt?.millisecondsSinceEpoch,
+        'pausedRemaining': pausedRemaining,
+        'updatedAt': updatedAt.millisecondsSinceEpoch,
+      };
+
+  factory TimerItem.fromJson(Map json) => TimerItem(
+        id: json['id'] as String,
+        name: json['name'] as String? ?? '',
+        durationSeconds: (json['durationSeconds'] as num?)?.toInt() ?? 300,
+        colorSeed: (json['colorSeed'] as num?)?.toInt() ?? 0,
+        order: (json['order'] as num?)?.toInt() ?? 0,
+        endsAt: json['endsAt'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(json['endsAt'] as int),
+        pausedRemaining: (json['pausedRemaining'] as num?)?.toInt(),
+        updatedAt: json['updatedAt'] == null
+            ? DateTime.fromMillisecondsSinceEpoch(0)
+            : DateTime.fromMillisecondsSinceEpoch(json['updatedAt'] as int),
+      );
+}
+
+/// One item on a [PomodoroPreset]'s session checklist.
+class PomodoroChecklistItem {
+  const PomodoroChecklistItem({
+    required this.id,
+    this.text = '',
+    this.done = false,
+  });
+
+  final String id;
+  final String text;
+  final bool done;
+
+  PomodoroChecklistItem copyWith({String? text, bool? done}) =>
+      PomodoroChecklistItem(
+        id: id,
+        text: text ?? this.text,
+        done: done ?? this.done,
+      );
+
+  Map<String, dynamic> toJson() =>
+      {'id': id, 'text': text, 'done': done};
+
+  factory PomodoroChecklistItem.fromJson(Map json) =>
+      PomodoroChecklistItem(
+        id: json['id'] as String,
+        text: json['text'] as String? ?? '',
+        done: json['done'] as bool? ?? false,
+      );
+}
+
+/// One user-created Pomodoro configuration. The running phase state isn't
+/// persisted here — that lives transiently on the session page (closing the
+/// session resets it, matching the original behaviour) — so this is just the
+/// recipe: lengths, rounds and presentation, plus a goal + checklist the
+/// user keeps with the preset (those *do* persist across sessions so tapping
+/// "Deep work" again next time still shows what you were working toward).
+class PomodoroPreset {
+  const PomodoroPreset({
+    required this.id,
+    this.name = '',
+    this.focusMinutes = 25,
+    this.shortBreakMinutes = 5,
+    this.longBreakMinutes = 15,
+    this.roundsBeforeLong = 4,
+    this.colorSeed = 0,
+    this.order = 0,
+    this.goals = '',
+    this.checklist = const [],
+    required this.createdAt,
+  });
+
+  final String id;
+  final String name;
+  final int focusMinutes;
+  final int shortBreakMinutes;
+  final int longBreakMinutes;
+
+  /// How many focus sessions before the long break replaces a short one.
+  final int roundsBeforeLong;
+  final int colorSeed;
+  final int order;
+
+  /// Free-text goal(s) the user keeps with this preset — shown on the
+  /// session screen so the "why" of the Pomodoro stays in view while it runs.
+  final String goals;
+
+  /// Bullet items the user can tick off during the session.
+  final List<PomodoroChecklistItem> checklist;
+  final DateTime createdAt;
+
+  Color get color => AppPalette.swatchFor(colorSeed);
+
+  /// One-line summary shown on the preset card, e.g. `25 / 5 / 15 · 4 rounds`.
+  String get summary =>
+      '$focusMinutes / $shortBreakMinutes / $longBreakMinutes '
+      '· $roundsBeforeLong rounds';
+
+  PomodoroPreset copyWith({
+    String? name,
+    int? focusMinutes,
+    int? shortBreakMinutes,
+    int? longBreakMinutes,
+    int? roundsBeforeLong,
+    int? colorSeed,
+    int? order,
+    String? goals,
+    List<PomodoroChecklistItem>? checklist,
+  }) =>
+      PomodoroPreset(
+        id: id,
+        name: name ?? this.name,
+        focusMinutes: focusMinutes ?? this.focusMinutes,
+        shortBreakMinutes: shortBreakMinutes ?? this.shortBreakMinutes,
+        longBreakMinutes: longBreakMinutes ?? this.longBreakMinutes,
+        roundsBeforeLong: roundsBeforeLong ?? this.roundsBeforeLong,
+        colorSeed: colorSeed ?? this.colorSeed,
+        order: order ?? this.order,
+        goals: goals ?? this.goals,
+        checklist: checklist ?? this.checklist,
+        createdAt: createdAt,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'focusMinutes': focusMinutes,
+        'shortBreakMinutes': shortBreakMinutes,
+        'longBreakMinutes': longBreakMinutes,
+        'roundsBeforeLong': roundsBeforeLong,
+        'colorSeed': colorSeed,
+        'order': order,
+        'goals': goals,
+        'checklist': [for (final i in checklist) i.toJson()],
+        'createdAt': createdAt.millisecondsSinceEpoch,
+      };
+
+  factory PomodoroPreset.fromJson(Map json) => PomodoroPreset(
+        id: json['id'] as String,
+        name: json['name'] as String? ?? '',
+        focusMinutes: (json['focusMinutes'] as num?)?.toInt() ?? 25,
+        shortBreakMinutes:
+            (json['shortBreakMinutes'] as num?)?.toInt() ?? 5,
+        longBreakMinutes:
+            (json['longBreakMinutes'] as num?)?.toInt() ?? 15,
+        roundsBeforeLong:
+            (json['roundsBeforeLong'] as num?)?.toInt() ?? 4,
+        colorSeed: (json['colorSeed'] as num?)?.toInt() ?? 0,
+        order: (json['order'] as num?)?.toInt() ?? 0,
+        goals: json['goals'] as String? ?? '',
+        checklist: [
+          for (final raw in (json['checklist'] as List? ?? const []))
+            if (raw is Map) PomodoroChecklistItem.fromJson(raw),
+        ],
+        createdAt: json['createdAt'] == null
+            ? DateTime.fromMillisecondsSinceEpoch(0)
+            : DateTime.fromMillisecondsSinceEpoch(
+                json['createdAt'] as int),
+      );
+}
+
 /// A single user profile + preferences (one row, stored under a fixed key).
 class UserProfile {
   const UserProfile({

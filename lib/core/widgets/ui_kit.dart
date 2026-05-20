@@ -197,6 +197,57 @@ Future<T?> showGlassDialog<T>(
   );
 }
 
+/// Swatch picker over [AppPalette.categorySwatches]. Returns the chosen
+/// index, or null if cancelled. Reused anywhere a model carries a colorSeed.
+Future<int?> showColorSeedPicker(
+  BuildContext context,
+  int currentSeed, {
+  String title = 'Pick a colour',
+}) {
+  final swatches = AppPalette.categorySwatches;
+  final current = currentSeed.abs() % swatches.length;
+  return showGlassDialog<int>(
+    context,
+    title: title,
+    content: Builder(
+      builder: (dialogCtx) => Wrap(
+        spacing: 14,
+        runSpacing: 14,
+        children: [
+          for (var i = 0; i < swatches.length; i++)
+            GestureDetector(
+              onTap: () => Navigator.of(dialogCtx).pop(i),
+              child: Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: swatches[i],
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: i == current
+                        ? Colors.white
+                        : Colors.white.withValues(alpha: 0.2),
+                    width: i == current ? 3 : 1,
+                  ),
+                ),
+                child: i == current
+                    ? const Icon(Icons.check_rounded,
+                        size: 20, color: Color(0xFF15132B))
+                    : null,
+              ),
+            ),
+        ],
+      ),
+    ),
+    actions: (dialogCtx) => [
+      TextButton(
+        onPressed: () => Navigator.pop(dialogCtx),
+        child: const Text('Cancel'),
+      ),
+    ],
+  );
+}
+
 /// Compact pill button used as a card action ("+ Add").
 class SoftButton extends StatelessWidget {
   const SoftButton({

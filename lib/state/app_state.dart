@@ -1,5 +1,10 @@
+import 'dart:async';
+
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/notifications.dart';
+import '../data/backup_service.dart';
 import '../data/local_store.dart';
 import '../data/models.dart';
 
@@ -265,6 +270,78 @@ class NoteNotifier extends CollectionNotifier<Note> {
       ]);
 }
 
+class TimerNotifier extends CollectionNotifier<TimerItem> {
+  @override
+  String get boxName => LocalStore.timers;
+  @override
+  String idOf(TimerItem i) => i.id;
+  @override
+  Map<String, dynamic> encode(TimerItem i) => i.toJson();
+  @override
+  TimerItem decode(Map j) => TimerItem.fromJson(j);
+
+  TimerItem? _byId(String id) {
+    for (final t in state) {
+      if (t.id == id) return t;
+    }
+    return null;
+  }
+
+  /// Persists a new manual order. [ordered] is the full list in its new
+  /// top-to-bottom sequence; positions are renumbered 0..n.
+  Future<void> reorder(List<TimerItem> ordered) => upsertAll([
+        for (var i = 0; i < ordered.length; i++) ordered[i].copyWith(order: i),
+      ]);
+
+  /// Apply [change] to the timer [id] if it still exists. The lifecycle
+  /// transitions ([TimerItem.started] etc.) all route through here so the
+  /// board, pop-out window and alarm engine stay in lock-step.
+  Future<void> _mutate(String id, TimerItem Function(TimerItem) change) async {
+    final t = _byId(id);
+    if (t != null) await upsert(change(t));
+  }
+
+  Future<void> start(String id) => _mutate(id, (t) => t.started());
+  Future<void> pause(String id) => _mutate(id, (t) => t.paused());
+  Future<void> resetToFull(String id) =>
+      _mutate(id, (t) => t.resetToFull());
+
+  Future<void> toggle(String id) =>
+      _mutate(id, (t) => t.isRunning ? t.paused() : t.started());
+
+  Future<void> rename(String id, String name) => _mutate(
+      id, (t) => t.copyWith(name: name, updatedAt: DateTime.now()));
+
+  Future<void> recolor(String id, int colorSeed) => _mutate(id,
+      (t) => t.copyWith(colorSeed: colorSeed, updatedAt: DateTime.now()));
+
+  /// Re-length a timer. A change resets it to a fresh, stopped full duration
+  /// (a running countdown to a now-different total would be meaningless).
+  Future<void> setDuration(String id, int seconds) => _mutate(
+        id,
+        (t) => t
+            .copyWith(durationSeconds: seconds, updatedAt: DateTime.now())
+            .resetToFull(),
+      );
+}
+
+class PomodoroNotifier extends CollectionNotifier<PomodoroPreset> {
+  @override
+  String get boxName => LocalStore.pomodoros;
+  @override
+  String idOf(PomodoroPreset i) => i.id;
+  @override
+  Map<String, dynamic> encode(PomodoroPreset i) => i.toJson();
+  @override
+  PomodoroPreset decode(Map j) => PomodoroPreset.fromJson(j);
+
+  /// Persists a new manual order. [ordered] is the full list in its new
+  /// top-to-bottom sequence; positions are renumbered 0..n.
+  Future<void> reorder(List<PomodoroPreset> ordered) => upsertAll([
+        for (var i = 0; i < ordered.length; i++) ordered[i].copyWith(order: i),
+      ]);
+}
+
 class InstitutionNotifier extends CollectionNotifier<Institution> {
   @override
   String get boxName => LocalStore.institutions;
@@ -316,6 +393,209 @@ final cardsProvider =
     NotifierProvider<CardNotifier, List<Flashcard>>(CardNotifier.new);
 final notesProvider =
     NotifierProvider<NoteNotifier, List<Note>>(NoteNotifier.new);
+final timersProvider =
+    NotifierProvider<TimerNotifier, List<TimerItem>>(TimerNotifier.new);
+final pomodorosProvider =
+    NotifierProvider<PomodoroNotifier, List<PomodoroPreset>>(
+        PomodoroNotifier.new);
+
+/// Recently used timer durations (seconds), most-recent first, capped so the
+/// board's "Recent" row stays compact. Persisted in the settings box.
+class TimerRecentsNotifier extends Notifier<List<int>> {
+  static const _max = 5;
+
+  @override
+  List<int> build() => ref.read(localStoreProvider).readTimerRecents();
+
+  Future<void> push(int seconds) async {
+    if (seconds <= 0) return;
+    final next = [seconds, ...state.where((s) => s != seconds)]
+        .take(_max)
+        .toList();
+    await ref.read(localStoreProvider).writeTimerRecents(next);
+    state = next;
+  }
+}
+
+final timerRecentsProvider =
+    NotifierProvider<TimerRecentsNotifier, List<int>>(
+        TimerRecentsNotifier.new);
+
+/// Live snapshot driving per-second redraws of running timers plus the set
+/// of timers currently ringing.
+typedef TimerEngineState = ({DateTime now, Set<String> alarmingIds});
+
+/// Owns the single 1-second ticker and the alarm sound for *all* timers.
+/// Lives in the main window for the whole session (instantiated from
+/// `main()`), so timers keep counting and ring even when the Timer page is
+/// off-screen or a timer is popped out into its own window.
+///
+/// Completion that happens *while the app is open* (a timer seen counting
+/// then crossing zero) rings the looping chime; a timer found already
+/// expired at launch shows "Time's up" silently until dismissed.
+class TimerEngine extends Notifier<TimerEngineState> {
+  Timer? _ticker;
+  AudioPlayer? _player;
+  bool _playing = false;
+
+  final Set<String> _alarming = {};
+
+  /// Ids that were actively counting (running, not yet expired) at the last
+  /// evaluation — used to tell a *fresh* finish from a stale one.
+  Set<String> _counting = {};
+
+  /// Notification bookkeeping: which timer ids currently own an "active" /
+  /// "finished" notification in the OS drawer, so we know what to refresh
+  /// vs. cancel on each evaluation.
+  final Set<String> _notifiedActive = {};
+  final Set<String> _notifiedDone = {};
+
+  @override
+  TimerEngineState build() {
+    ref.listen(timersProvider, (_, next) => _evaluate(next));
+    ref.onDispose(() {
+      _ticker?.cancel();
+      _player?.dispose();
+      // Clear any drawer notifications we own — they'd otherwise be stale
+      // through a hot restart or container tear-down.
+      final notifs = AppNotifications.instance;
+      for (final id in _notifiedActive) {
+        unawaited(notifs.cancelActiveTimer(id));
+      }
+      for (final id in _notifiedDone) {
+        unawaited(notifs.cancelFinishedTimer(id));
+      }
+      _notifiedActive.clear();
+      _notifiedDone.clear();
+    });
+    // First evaluation once the container is up.
+    Future.microtask(() => _evaluate(ref.read(timersProvider)));
+    return (now: DateTime.now(), alarmingIds: const {});
+  }
+
+  void _evaluate(List<TimerItem> timers) {
+    final byId = {for (final t in timers) t.id: t};
+
+    // Drop alarms whose timer was dismissed/reset/deleted elsewhere (e.g.
+    // from a pop-out window round-tripping a reset back through the bridge).
+    _alarming.removeWhere(
+        (id) => byId[id] == null || !byId[id]!.isFinished);
+
+    final counting = <String>{};
+    for (final t in timers) {
+      if (t.isRunning && !t.isFinished) {
+        counting.add(t.id);
+      } else if (t.isFinished && _counting.contains(t.id)) {
+        _alarming.add(t.id); // crossed zero while we were watching
+      }
+    }
+    _counting = counting;
+
+    _syncAudio();
+    _syncNotifications(timers);
+    _scheduleTicker(counting.isNotEmpty);
+    state = (now: DateTime.now(), alarmingIds: Set.unmodifiable(_alarming));
+  }
+
+  /// Push the current set of running/finished timers out to the OS drawer.
+  /// Quiet, throttled, fault-tolerant — the [AppNotifications] service
+  /// no-ops if init failed (e.g. unpackaged Windows builds).
+  void _syncNotifications(List<TimerItem> timers) {
+    final notifs = AppNotifications.instance;
+
+    // What *should* be in the drawer right now.
+    final shouldBeActive = <String>{};
+    final shouldBeDone = <String>{};
+    for (final t in timers) {
+      if (_alarming.contains(t.id)) {
+        shouldBeDone.add(t.id);
+      } else if (t.isRunning && !t.isFinished) {
+        shouldBeActive.add(t.id);
+      }
+    }
+
+    // Drop notifications for timers that left their state (paused/reset/deleted).
+    for (final id in _notifiedActive.toList()) {
+      if (!shouldBeActive.contains(id)) {
+        unawaited(notifs.cancelActiveTimer(id));
+        _notifiedActive.remove(id);
+      }
+    }
+    for (final id in _notifiedDone.toList()) {
+      if (!shouldBeDone.contains(id)) {
+        unawaited(notifs.cancelFinishedTimer(id));
+        _notifiedDone.remove(id);
+      }
+    }
+
+    // Refresh / show active notifications.
+    for (final t in timers) {
+      if (!shouldBeActive.contains(t.id)) continue;
+      final isNew = !_notifiedActive.contains(t.id);
+      if (isNew ||
+          notifs.shouldRefreshActiveTimer(t.id, t.remainingSeconds)) {
+        unawaited(notifs.showActiveTimer(t));
+        _notifiedActive.add(t.id);
+      }
+    }
+
+    // Fire a one-shot "Time's up" notification for any new finishes.
+    for (final t in timers) {
+      if (!shouldBeDone.contains(t.id)) continue;
+      if (!_notifiedDone.contains(t.id)) {
+        unawaited(notifs.showTimerFinished(t));
+        _notifiedDone.add(t.id);
+      }
+    }
+  }
+
+  void _tick() {
+    _evaluate(ref.read(timersProvider));
+  }
+
+  /// Keep a 1-second heartbeat only while something is actually counting or
+  /// ringing; otherwise idle so nothing rebuilds needlessly.
+  void _scheduleTicker(bool counting) {
+    final needed = counting || _alarming.isNotEmpty;
+    if (needed && _ticker == null) {
+      _ticker =
+          Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+    } else if (!needed && _ticker != null) {
+      _ticker!.cancel();
+      _ticker = null;
+    }
+  }
+
+  Future<void> _syncAudio() async {
+    if (_alarming.isNotEmpty && !_playing) {
+      _playing = true;
+      try {
+        final p = _player ??= AudioPlayer();
+        await p.setReleaseMode(ReleaseMode.loop);
+        await p.play(AssetSource('sounds/alarm.wav'));
+      } catch (_) {
+        _playing = false; // audio unavailable — visual alarm still shows
+      }
+    } else if (_alarming.isEmpty && _playing) {
+      _playing = false;
+      try {
+        await _player?.stop();
+      } catch (_) {}
+    }
+  }
+
+  /// Silence [id]'s alarm and reset it to a fresh full duration.
+  void dismiss(String id) {
+    _alarming.remove(id);
+    unawaited(ref.read(timersProvider.notifier).resetToFull(id));
+    _syncAudio();
+    _scheduleTicker(_counting.isNotEmpty);
+    state = (now: DateTime.now(), alarmingIds: Set.unmodifiable(_alarming));
+  }
+}
+
+final timerEngineProvider =
+    NotifierProvider<TimerEngine, TimerEngineState>(TimerEngine.new);
 final gradeCategoriesProvider =
     NotifierProvider<GradeCategoryNotifier, List<GradeCategory>>(
         GradeCategoryNotifier.new);
@@ -341,6 +621,45 @@ class ProfileNotifier extends Notifier<UserProfile> {
 
 final profileProvider =
     NotifierProvider<ProfileNotifier, UserProfile>(ProfileNotifier.new);
+
+final backupServiceProvider = Provider<BackupService>(
+  (ref) => BackupService(ref.read(localStoreProvider)),
+);
+
+/// Rebuilds exactly the collections an import touched. The merge writes
+/// straight to Hive, so the affected notifiers must be invalidated for any
+/// open page to reflect the restored data.
+void refreshAfterImport(WidgetRef ref, Iterable<BackupCategory> cats) {
+  for (final c in cats) {
+    switch (c) {
+      case BackupCategory.profile:
+        ref.invalidate(profileProvider);
+      case BackupCategory.coursesGrades:
+        ref.invalidate(coursesProvider);
+        ref.invalidate(gradesProvider);
+        ref.invalidate(gradeCategoriesProvider);
+      case BackupCategory.academicHistory:
+        ref.invalidate(institutionsProvider);
+        ref.invalidate(semestersProvider);
+        ref.invalidate(pastCoursesProvider);
+      case BackupCategory.todos:
+        ref.invalidate(tasksProvider);
+        ref.invalidate(foldersProvider);
+      case BackupCategory.planner:
+        ref.invalidate(blocksProvider);
+        ref.invalidate(eventsProvider);
+      case BackupCategory.flashcards:
+        ref.invalidate(decksProvider);
+        ref.invalidate(cardsProvider);
+      case BackupCategory.notes:
+        ref.invalidate(notesProvider);
+      case BackupCategory.timers:
+        ref.invalidate(timersProvider);
+      case BackupCategory.pomodoros:
+        ref.invalidate(pomodorosProvider);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Derived / computed providers

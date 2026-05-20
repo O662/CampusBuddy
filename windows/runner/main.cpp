@@ -32,8 +32,27 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   }
   window.SetQuitOnClose(true);
 
+  // The desktop_multi_window plugin posts WM_QUIT whenever the last
+  // *plugin-created* window closes (MultiWindowManager::RemoveWindow). It
+  // has no knowledge of this main window, so closing the last popped-out
+  // note would otherwise tear down the whole app. Ignore a quit while the
+  // main window is still alive — only the main window closing (which, via
+  // SetQuitOnClose, posts WM_QUIT after its HWND is already destroyed)
+  // should actually end the process.
+  HWND main_window = window.GetHandle();
+
   ::MSG msg;
-  while (::GetMessage(&msg, nullptr, 0, 0)) {
+  while (true) {
+    BOOL result = ::GetMessage(&msg, nullptr, 0, 0);
+    if (result == -1) {
+      break;  // GetMessage failed.
+    }
+    if (result == 0) {  // WM_QUIT.
+      if (::IsWindow(main_window)) {
+        continue;  // Spurious quit from a closing pop-out — keep running.
+      }
+      break;  // Main window is gone: really quit.
+    }
     ::TranslateMessage(&msg);
     ::DispatchMessage(&msg);
   }

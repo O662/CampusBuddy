@@ -11,7 +11,9 @@ import '../features/notes/notes_page.dart';
 import '../features/planner/planner_page.dart';
 import '../features/profile/profile_page.dart';
 import '../features/study/study_page.dart';
+import '../features/timer/pomodoro_session_page.dart';
 import '../features/timer/timer_page.dart';
+import '../features/timer/timer_popout_page.dart';
 import '../features/todo/todo_page.dart';
 import 'app_shell.dart';
 
@@ -99,6 +101,19 @@ final appRouter = GoRouter(
       path: '/note/:id',
       pageBuilder: (context, state) =>
           _fade(NotePopoutPage(noteId: state.pathParameters['id']!)),
+    ),
+    // Likewise for timers: in-app fallback for platforms without OS windows.
+    GoRoute(
+      path: '/timer-window/:id',
+      pageBuilder: (context, state) =>
+          _fade(TimerPopoutPage(timerId: state.pathParameters['id']!)),
+    ),
+    // A running Pomodoro session. Lives outside the shell so it fills the
+    // whole window — an immersive surface like /center.
+    GoRoute(
+      path: '/pomodoro/:id',
+      pageBuilder: (context, state) => _fade(
+          PomodoroSessionPage(presetId: state.pathParameters['id']!)),
     ),
   ],
 );

@@ -28,6 +28,8 @@ class LocalStore {
   static const decks = 'decks';
   static const cards = 'cards';
   static const notes = 'notes';
+  static const timers = 'timers';
+  static const pomodoros = 'pomodoros';
   static const institutions = 'institutions';
   static const semesters = 'semesters';
   static const pastCourses = 'pastCourses';
@@ -45,6 +47,8 @@ class LocalStore {
     decks,
     cards,
     notes,
+    timers,
+    pomodoros,
     institutions,
     semesters,
     pastCourses,
@@ -83,6 +87,22 @@ class LocalStore {
 
   Future<void> writeProfile(UserProfile profile) =>
       box(settings).put('profile', profile.toJson());
+
+  /// Recently used timer durations (seconds), most-recent first, for the
+  /// Timer board's one-tap "Recent" suggestions.
+  List<int> readTimerRecents() {
+    final raw = box(settings).get('timerRecents');
+    if (raw is List) {
+      return [
+        for (final v in raw)
+          if (v is num) v.toInt(),
+      ];
+    }
+    return const [];
+  }
+
+  Future<void> writeTimerRecents(List<int> seconds) =>
+      box(settings).put('timerRecents', seconds);
 
   /// Populate a friendly starter dataset the first time the app runs so the
   /// dashboard, planner and study pages have something to show.

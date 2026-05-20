@@ -36,6 +36,288 @@ Future<DateTime?> _pickDate(BuildContext context, DateTime initial) {
   );
 }
 
+/// Create / edit a countdown timer: name, H:M:S length and accent colour.
+/// Returns the chosen values, or null if cancelled. Persisting is the
+/// caller's job (kept Riverpod-free like the other dialogs here).
+Future<({String name, int seconds, int colorSeed})?> showTimerDurationDialog(
+  BuildContext context, {
+  String name = '',
+  int initialSeconds = 5 * 60,
+  int colorSeed = 0,
+  bool isNew = true,
+}) async {
+  final nameC = TextEditingController(text: name);
+  var h = initialSeconds ~/ 3600;
+  var m = (initialSeconds % 3600) ~/ 60;
+  var s = initialSeconds % 60;
+  var seed = colorSeed;
+
+  Widget unit(
+    String label,
+    int value,
+    int maxVal,
+    void Function(int) onChanged,
+  ) {
+    void bump(int delta) {
+      var v = value + delta;
+      if (v < 0) v = maxVal;
+      if (v > maxVal) v = 0;
+      onChanged(v);
+    }
+
+    return Column(
+      children: [
+        IconButton(
+          icon: const Icon(Icons.keyboard_arrow_up_rounded),
+          onPressed: () => bump(1),
+        ),
+        Container(
+          width: 58,
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppPalette.glassStroke),
+          ),
+          child: Text(
+            value.toString().padLeft(2, '0'),
+            style: const TextStyle(
+                fontSize: 26, fontWeight: FontWeight.w700),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(label,
+            style: const TextStyle(
+                fontSize: 11, color: AppPalette.textSecondary)),
+        IconButton(
+          icon: const Icon(Icons.keyboard_arrow_down_rounded),
+          onPressed: () => bump(-1),
+        ),
+      ],
+    );
+  }
+
+  return showGlassDialog<({String name, int seconds, int colorSeed})>(
+    context,
+    title: isNew ? 'New timer' : 'Edit timer',
+    content: StatefulBuilder(
+      builder: (context, setState) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _field(nameC, 'Timer name (optional)'),
+          const SizedBox(height: 18),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              unit('hours', h, 23, (v) => setState(() => h = v)),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6),
+                child: Text(':',
+                    style: TextStyle(
+                        fontSize: 24, fontWeight: FontWeight.w700)),
+              ),
+              unit('min', m, 59, (v) => setState(() => m = v)),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 6),
+                child: Text(':',
+                    style: TextStyle(
+                        fontSize: 24, fontWeight: FontWeight.w700)),
+              ),
+              unit('sec', s, 59, (v) => setState(() => s = v)),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Wrap(
+            spacing: 10,
+            children: [
+              for (var i = 0;
+                  i < AppPalette.categorySwatches.length;
+                  i++)
+                GestureDetector(
+                  onTap: () => setState(() => seed = i),
+                  child: Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: AppPalette.categorySwatches[i],
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color:
+                            seed == i ? Colors.white : Colors.transparent,
+                        width: 2.5,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    ),
+    actions: (context) => [
+      TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel')),
+      FilledButton(
+        onPressed: () {
+          final total = h * 3600 + m * 60 + s;
+          if (total <= 0) return; // a 0-second timer is meaningless
+          Navigator.pop(context, (
+            name: nameC.text.trim(),
+            seconds: total,
+            colorSeed: seed,
+          ));
+        },
+        child: const Text('Save'),
+      ),
+    ],
+  ).whenComplete(nameC.dispose);
+}
+
+/// Create / edit a Pomodoro preset: name, focus / short break / long break
+/// minutes, rounds-before-long, accent colour. Returns the chosen values
+/// (the caller persists). One vertical stack of labelled steppers — clearer
+/// than four side-by-side dials for whole-minute lengths.
+Future<({
+  String name,
+  int focusMinutes,
+  int shortBreakMinutes,
+  int longBreakMinutes,
+  int roundsBeforeLong,
+  int colorSeed,
+})?> showPomodoroPresetDialog(
+  BuildContext context, {
+  String name = '',
+  int focusMinutes = 25,
+  int shortBreakMinutes = 5,
+  int longBreakMinutes = 15,
+  int roundsBeforeLong = 4,
+  int colorSeed = 0,
+  bool isNew = true,
+}) async {
+  final nameC = TextEditingController(text: name);
+  var f = focusMinutes;
+  var sb = shortBreakMinutes;
+  var lb = longBreakMinutes;
+  var rounds = roundsBeforeLong;
+  var seed = colorSeed;
+
+  Widget stepperRow(
+    String label,
+    int value,
+    String suffix,
+    int min,
+    int max,
+    int step,
+    void Function(int) onChanged,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(label,
+                style: const TextStyle(
+                    fontSize: 13, color: AppPalette.textSecondary)),
+          ),
+          IconButton(
+            icon: const Icon(Icons.remove_rounded),
+            onPressed: value > min
+                ? () => onChanged((value - step).clamp(min, max))
+                : null,
+          ),
+          SizedBox(
+            width: 64,
+            child: Text(
+              '$value $suffix',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  fontSize: 15, fontWeight: FontWeight.w700),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.add_rounded),
+            onPressed: value < max
+                ? () => onChanged((value + step).clamp(min, max))
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  return showGlassDialog<({
+    String name,
+    int focusMinutes,
+    int shortBreakMinutes,
+    int longBreakMinutes,
+    int roundsBeforeLong,
+    int colorSeed,
+  })>(
+    context,
+    title: isNew ? 'New Pomodoro' : 'Edit Pomodoro',
+    content: StatefulBuilder(
+      builder: (context, setState) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _field(nameC, 'Name (e.g. Deep work, Study sprint)'),
+          const SizedBox(height: 12),
+          stepperRow('Focus session', f, 'min', 5, 120, 5,
+              (v) => setState(() => f = v)),
+          stepperRow('Short break', sb, 'min', 1, 30, 1,
+              (v) => setState(() => sb = v)),
+          stepperRow('Long break', lb, 'min', 5, 60, 5,
+              (v) => setState(() => lb = v)),
+          stepperRow('Rounds before long break', rounds, '', 2, 8, 1,
+              (v) => setState(() => rounds = v)),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 10,
+            children: [
+              for (var i = 0;
+                  i < AppPalette.categorySwatches.length;
+                  i++)
+                GestureDetector(
+                  onTap: () => setState(() => seed = i),
+                  child: Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: AppPalette.categorySwatches[i],
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: seed == i
+                            ? Colors.white
+                            : Colors.transparent,
+                        width: 2.5,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    ),
+    actions: (context) => [
+      TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel')),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, (
+          name: nameC.text.trim(),
+          focusMinutes: f,
+          shortBreakMinutes: sb,
+          longBreakMinutes: lb,
+          roundsBeforeLong: rounds,
+          colorSeed: seed,
+        )),
+        child: const Text('Save'),
+      ),
+    ],
+  ).whenComplete(nameC.dispose);
+}
+
 Future<TaskItem?> showTaskDialog(
   BuildContext context, {
   TaskItem? existing,
@@ -967,7 +1249,16 @@ Future<Semester?> showSemesterDialog(
             ],
           ),
           const SizedBox(height: 12),
-          _field(nameC, 'Custom label (optional)'),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Custom label (optional)',
+                  style: TextStyle(
+                      fontSize: 11, color: AppPalette.textSecondary)),
+              const SizedBox(height: 4),
+              _field(nameC, 'Summer 1, Winter Minimester, etc...'),
+            ],
+          ),
           const SizedBox(height: 8),
           const Text(
             'Leave the label blank to use "Term Year".',
