@@ -1,81 +1,66 @@
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:local_notifier/local_notifier.dart';
 
 import '../data/models.dart' show TimerItem;
 
-/// Wraps `flutter_local_notifications` so the rest of the app stays
-/// platform-agnostic. Falls back to a quiet no-op on web (no native drawer)
-/// or when init fails (e.g. an unpackaged Windows build where the OS
-/// rejects the toast registration) — the app still works, the drawer just
-/// stays empty.
+/// OS-drawer notifications for active timers + the running Pomodoro. Uses
+/// `local_notifier` because it handles the Windows-specific Start-menu
+/// shortcut + AppUserModelID registration automatically (the missing piece
+/// behind "Windows Defender is blocking my notifications" with the more
+/// heavyweight `flutter_local_notifications` on unpackaged dev builds).
 ///
-/// Two notification flavours per timer:
+/// Cross-platform note: `local_notifier` is **desktop-only**
+/// (Windows / macOS / Linux). On web and mobile the service no-ops; add a
+/// platform-conditional path here when mobile becomes a real target.
 ///
-/// * **Active** — low-priority, ongoing, silent. One per running countdown
-///   timer and one for the active Pomodoro session. Refreshed once per
-///   minute as the countdown drops; the body shows "X left · goes off at
-///   3:45 PM" so a glance at the drawer is enough.
-/// * **Finished** — high-priority, one-shot, with the system alert sound.
-///   Fired when a timer actually fires. Cleared when the user dismisses
-///   the alarm in-app.
+/// Design: notifications are only re-issued when their *contents* would
+/// change (a Start, Pause, Reset, Resume or Finish — never per-second). The
+/// body shows the wall-clock "goes off at 3:45 PM" so a glance at the
+/// drawer tells you when it fires without needing live updates. That also
+/// avoids triggering the OS toast sound on every refresh.
 class AppNotifications {
   AppNotifications._();
   static final AppNotifications instance = AppNotifications._();
 
-  final _plugin = FlutterLocalNotificationsPlugin();
   bool _ready = false;
 
-  // Reserved id space for the single Pomodoro slot. Picked far away from
-  // anywhere a timer-id hash would land.
-  static const int _pomodoroId = 0x70000001;
+  /// Per-key live notification. We keep handles so we can `destroy()` and
+  /// replace on update — `local_notifier` keys its own state by the
+  /// `LocalNotification` instance, not its identifier string.
+  final Map<String, LocalNotification> _live = {};
 
-  // Throttle state — only re-issue a notification when the "minute bucket"
-  // it would show changes, so the drawer doesn't churn every second.
-  final Map<String, int> _lastTimerBucket = {};
+  /// Last shown signature per timer id so we can skip a re-show when
+  /// nothing the user would see has changed.
+  final Map<String, String> _lastActiveSig = {};
+
+  /// Last shown "minute bucket" per timer id — so the body's `X left`
+  /// counts down with the timer instead of going stale.
+  final Map<String, int> _lastActiveBucket = {};
   int _lastPomoBucket = -1;
 
   /// One-time init. Safe to call once from `main()`; later calls are no-ops.
   Future<void> init() async {
     if (kIsWeb || _ready) return;
+    // local_notifier supports desktop only.
+    if (!(Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+      return;
+    }
     try {
-      const init = InitializationSettings(
-        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-        iOS: DarwinInitializationSettings(
-          requestAlertPermission: true,
-          requestBadgePermission: false,
-          requestSoundPermission: false,
-        ),
-        macOS: DarwinInitializationSettings(
-          requestAlertPermission: true,
-          requestBadgePermission: false,
-          requestSoundPermission: false,
-        ),
-        linux: LinuxInitializationSettings(
-          defaultActionName: 'Open CampusBuddy',
-        ),
-        windows: WindowsInitializationSettings(
-          appName: 'CampusBuddy',
-          appUserModelId: 'com.campusbuddy.app',
-          // Stable random GUID — must not change between releases, or the
-          // OS will treat this as a different sender and lose pinned toasts.
-          guid: '7beb1f88-3d5b-4f6f-a8c0-9c4e2a5d8b1f',
-        ),
+      await localNotifier.setup(
+        appName: 'CampusBuddy',
+        // On Windows, the OS only displays toasts from apps that have a
+        // Start menu shortcut tied to an AppUserModelID. requireCreate
+        // makes the package register one on first run, so toasts show up
+        // in Action Center without the user installing or packaging
+        // anything — and Defender stops silencing them.
+        shortcutPolicy: ShortcutPolicy.requireCreate,
       );
-      await _plugin.initialize(init);
-
-      // Android 13+ surfaces a runtime permission gate for notifications.
-      if (!kIsWeb && Platform.isAndroid) {
-        await _plugin
-            .resolvePlatformSpecificImplementation<
-                AndroidFlutterLocalNotificationsPlugin>()
-            ?.requestNotificationsPermission();
-      }
       _ready = true;
     } catch (_) {
-      // Init failure → silently disable. Common on unpackaged Windows
-      // builds where the app isn't registered with the OS yet.
+      // If setup throws (rare — usually a sandboxed environment), the
+      // service quietly disables and the rest of the app keeps working.
       _ready = false;
     }
   }
@@ -84,59 +69,80 @@ class AppNotifications {
   // Timer notifications — driven by [TimerEngine]
   // ---------------------------------------------------------------------
 
-  /// Hash a UUID-ish string into a stable positive int notification id.
-  int _idForTimer(String uuid) => uuid.hashCode & 0x3FFFFFFF;
-  int _idForTimerDone(String uuid) => (_idForTimer(uuid) ^ 0x10000000) | 0x40000000;
+  String _activeKey(String id) => 'timer-active-$id';
+  String _doneKey(String id) => 'timer-done-$id';
 
-  /// True when an active-timer notification for [id] should be re-issued
-  /// because its visible "minute left" bucket changed since last update.
-  bool shouldRefreshActiveTimer(String id, int remainingSeconds) {
-    final bucket = _bucketForRemaining(remainingSeconds);
-    if (_lastTimerBucket[id] == bucket) return false;
-    _lastTimerBucket[id] = bucket;
+  /// True when the visible state for [t] changed since the last push.
+  /// Lets the engine cheaply skip re-issuing during a per-second tick.
+  bool activeSignatureChanged(TimerItem t) {
+    final sig = '${t.name}|${t.endsAt?.millisecondsSinceEpoch ?? 0}';
+    if (_lastActiveSig[t.id] == sig) return false;
+    _lastActiveSig[t.id] = sig;
     return true;
+  }
+
+  /// True when [t]'s visible "X left" should change — i.e. it crossed
+  /// into a new minute (or, in the last minute, a new 10-second slice).
+  /// Drives the live countdown in the drawer.
+  bool activeBucketChanged(TimerItem t) {
+    final bucket = _bucketForRemaining(t.remainingSeconds);
+    if (_lastActiveBucket[t.id] == bucket) return false;
+    _lastActiveBucket[t.id] = bucket;
+    return true;
+  }
+
+  /// Same "minute bucket" trick for the running Pomodoro session.
+  bool pomodoroBucketChanged(int remainingSeconds) {
+    final bucket = _bucketForRemaining(remainingSeconds);
+    if (_lastPomoBucket == bucket) return false;
+    _lastPomoBucket = bucket;
+    return true;
+  }
+
+  int _bucketForRemaining(int seconds) {
+    if (seconds >= 60) return 60 + (seconds ~/ 60); // bucket per minute
+    return seconds ~/ 10; // 0..5 in the final minute for finer feedback
   }
 
   Future<void> showActiveTimer(TimerItem t) async {
     if (!_ready || t.endsAt == null) return;
     final name = t.name.trim().isEmpty ? 'Timer' : t.name.trim();
-    final body = '${_humanLeft(t.remainingSeconds)} left'
-        ' · goes off at ${_fmtClock(t.endsAt!)}';
-    try {
-      await _plugin.show(_idForTimer(t.id), name, body, _activeDetails(name));
-    } catch (_) {}
+    await _showOrReplace(
+      _activeKey(t.id),
+      LocalNotification(
+        identifier: _activeKey(t.id),
+        title: name,
+        body: 'Goes off at ${_fmtClock(t.endsAt!)}'
+            ' · ${_humanLeft(t.remainingSeconds)} left',
+        silent: true, // ongoing-style entries shouldn't ding
+      ),
+    );
   }
 
   Future<void> showTimerFinished(TimerItem t) async {
     if (!_ready) return;
+    await _cancel(_activeKey(t.id));
     final name = t.name.trim().isEmpty ? 'Timer' : t.name.trim();
-    try {
-      await _plugin.cancel(_idForTimer(t.id));
-      await _plugin.show(
-        _idForTimerDone(t.id),
-        "$name — Time's up",
-        'Your ${_humanLeft(t.durationSeconds)} timer just finished.',
-        _doneDetails(name),
-      );
-    } catch (_) {}
+    await _showOrReplace(
+      _doneKey(t.id),
+      LocalNotification(
+        identifier: _doneKey(t.id),
+        title: "$name — Time's up",
+        body: 'Your ${_humanLeft(t.durationSeconds)} timer just finished.',
+        // not silent — the toast sound is the visual companion to the
+        // in-app alarm chime.
+      ),
+    );
   }
 
   Future<void> cancelActiveTimer(String id) async {
-    if (!_ready) return;
-    _lastTimerBucket.remove(id);
-    try {
-      await _plugin.cancel(_idForTimer(id));
-    } catch (_) {}
+    _lastActiveSig.remove(id);
+    _lastActiveBucket.remove(id);
+    await _cancel(_activeKey(id));
   }
 
-  Future<void> cancelFinishedTimer(String id) async {
-    if (!_ready) return;
-    try {
-      await _plugin.cancel(_idForTimerDone(id));
-    } catch (_) {}
-  }
+  Future<void> cancelFinishedTimer(String id) => _cancel(_doneKey(id));
 
-  /// Tear-down used when a timer is deleted outright.
   Future<void> cancelTimer(String id) async {
     await cancelActiveTimer(id);
     await cancelFinishedTimer(id);
@@ -146,15 +152,7 @@ class AppNotifications {
   // Pomodoro session — single slot, driven by the session page
   // ---------------------------------------------------------------------
 
-  /// Throttle: true at the start of each new minute bucket of the session
-  /// countdown. The session page already ticks every second; this lets it
-  /// piggy-back a notification refresh on those ticks cheaply.
-  bool shouldRefreshPomodoro(int remainingSeconds) {
-    final bucket = _bucketForRemaining(remainingSeconds);
-    if (_lastPomoBucket == bucket) return false;
-    _lastPomoBucket = bucket;
-    return true;
-  }
+  static const _pomoKey = 'pomodoro-active';
 
   Future<void> showPomodoro({
     required String name,
@@ -165,33 +163,51 @@ class AppNotifications {
   }) async {
     if (!_ready) return;
     final title = name.trim().isEmpty ? 'Pomodoro' : name.trim();
+    final endsAt =
+        DateTime.now().add(Duration(seconds: remainingSeconds));
     final body = remainingSeconds > 0
-        ? '$phaseLabel · ${_humanLeft(remainingSeconds)} left'
+        ? '$phaseLabel · ends at ${_fmtClock(endsAt)}'
             ' · round $round of $totalRounds'
         : phaseLabel;
-    try {
-      await _plugin.show(_pomodoroId, title, body, _pomodoroDetails(title));
-    } catch (_) {}
+    await _showOrReplace(
+      _pomoKey,
+      LocalNotification(
+        identifier: _pomoKey,
+        title: title,
+        body: body,
+        silent: true,
+      ),
+    );
   }
 
   Future<void> cancelPomodoro() async {
-    if (!_ready) return;
     _lastPomoBucket = -1;
-    try {
-      await _plugin.cancel(_pomodoroId);
-    } catch (_) {}
+    await _cancel(_pomoKey);
   }
 
   // ---------------------------------------------------------------------
-  // Helpers
+  // Internals
   // ---------------------------------------------------------------------
 
-  /// "Minute bucket" used for throttling so the drawer only refreshes when
-  /// the visible "X left" digit would change. Below a minute, every 10s gets
-  /// its own bucket so the last stretch shows real progress.
-  int _bucketForRemaining(int seconds) {
-    if (seconds >= 60) return 60 + (seconds ~/ 60); // bucket per minute
-    return seconds ~/ 10; // 0..5 for the final minute
+  Future<void> _showOrReplace(String key, LocalNotification n) async {
+    final existing = _live[key];
+    if (existing != null) {
+      try {
+        await existing.destroy();
+      } catch (_) {}
+    }
+    _live[key] = n;
+    try {
+      await n.show();
+    } catch (_) {}
+  }
+
+  Future<void> _cancel(String key) async {
+    final existing = _live.remove(key);
+    if (existing == null) return;
+    try {
+      await existing.destroy();
+    } catch (_) {}
   }
 
   String _humanLeft(int sec) {
@@ -201,10 +217,7 @@ class AppNotifications {
       final m = (sec % 3600) ~/ 60;
       return m > 0 ? '${h}h ${m}m' : '${h}h';
     }
-    if (sec >= 60) {
-      final m = sec ~/ 60;
-      return '${m}m';
-    }
+    if (sec >= 60) return '${sec ~/ 60}m';
     return '${sec}s';
   }
 
@@ -214,74 +227,4 @@ class AppNotifications {
     final h12 = h % 12 == 0 ? 12 : h % 12;
     return '$h12:${t.minute.toString().padLeft(2, '0')} $ampm';
   }
-
-  NotificationDetails _activeDetails(String tickerText) => NotificationDetails(
-        android: AndroidNotificationDetails(
-          'cb_timer_active',
-          'Active timers',
-          channelDescription: 'Ongoing countdown timers from CampusBuddy',
-          importance: Importance.low,
-          priority: Priority.low,
-          onlyAlertOnce: true,
-          ongoing: true,
-          autoCancel: false,
-          silent: true,
-          ticker: tickerText,
-        ),
-        iOS: const DarwinNotificationDetails(
-          presentSound: false,
-          presentBadge: false,
-        ),
-        macOS: const DarwinNotificationDetails(
-          presentSound: false,
-          presentBadge: false,
-        ),
-        linux: const LinuxNotificationDetails(),
-        windows: const WindowsNotificationDetails(),
-      );
-
-  NotificationDetails _doneDetails(String tickerText) => NotificationDetails(
-        android: AndroidNotificationDetails(
-          'cb_timer_done',
-          'Finished timers',
-          channelDescription:
-              'Notifications when a CampusBuddy countdown finishes',
-          importance: Importance.high,
-          priority: Priority.high,
-          autoCancel: true,
-          ticker: tickerText,
-        ),
-        iOS: const DarwinNotificationDetails(presentSound: true),
-        macOS: const DarwinNotificationDetails(presentSound: true),
-        linux: const LinuxNotificationDetails(
-          urgency: LinuxNotificationUrgency.critical,
-        ),
-        windows: const WindowsNotificationDetails(),
-      );
-
-  NotificationDetails _pomodoroDetails(String tickerText) =>
-      NotificationDetails(
-        android: AndroidNotificationDetails(
-          'cb_pomodoro_active',
-          'Active Pomodoro',
-          channelDescription: 'The Pomodoro session currently in progress',
-          importance: Importance.low,
-          priority: Priority.low,
-          onlyAlertOnce: true,
-          ongoing: true,
-          autoCancel: false,
-          silent: true,
-          ticker: tickerText,
-        ),
-        iOS: const DarwinNotificationDetails(
-          presentSound: false,
-          presentBadge: false,
-        ),
-        macOS: const DarwinNotificationDetails(
-          presentSound: false,
-          presentBadge: false,
-        ),
-        linux: const LinuxNotificationDetails(),
-        windows: const WindowsNotificationDetails(),
-      );
 }

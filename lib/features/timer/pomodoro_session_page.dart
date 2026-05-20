@@ -95,15 +95,16 @@ class _PomodoroSessionPageState
       return;
     }
     setState(() => _running = true);
+    // Push on Start, then re-push every minute as the countdown drops so
+    // the drawer's "X left" stays live. `silent: true` on the underlying
+    // notification keeps the OS quiet on each refresh.
     _pushNotif(p);
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (_remaining <= 1) {
         _advance(p);
       } else {
         setState(() => _remaining--);
-        // Drawer refresh is throttled to once per "minute bucket" inside
-        // [AppNotifications]; this just lets it check.
-        if (AppNotifications.instance.shouldRefreshPomodoro(_remaining)) {
+        if (AppNotifications.instance.pomodoroBucketChanged(_remaining)) {
           _pushNotif(p);
         }
       }
@@ -614,6 +615,8 @@ class _GoalsBoxState extends ConsumerState<_GoalsBox> {
                   border: InputBorder.none,
                   hintText:
                       'What are you trying to accomplish this session?',
+                  hintStyle: TextStyle(
+                      color: AppPalette.textSecondary, fontSize: 13.5),
                 ),
               ),
             ),
@@ -688,6 +691,8 @@ class _GoalsBoxState extends ConsumerState<_GoalsBox> {
                   decoration: const InputDecoration(
                     isDense: true,
                     hintText: 'Add an item…',
+                    hintStyle: TextStyle(
+                        color: AppPalette.textSecondary, fontSize: 13.5),
                   ),
                 ),
               ),

@@ -528,12 +528,18 @@ class TimerEngine extends Notifier<TimerEngineState> {
       }
     }
 
-    // Refresh / show active notifications.
+    // Refresh / show active notifications. Re-push when either:
+    //  • state really changed (Start, Resume, Reset, rename) → handled by
+    //    [activeSignatureChanged], or
+    //  • the visible "X left" should drop a digit (a new minute bucket,
+    //    or a 10-second slice in the final minute) → handled by
+    //    [activeBucketChanged]. The notification body uses `silent: true`
+    //    so these per-minute re-pushes don't make the OS ding each time.
     for (final t in timers) {
       if (!shouldBeActive.contains(t.id)) continue;
-      final isNew = !_notifiedActive.contains(t.id);
-      if (isNew ||
-          notifs.shouldRefreshActiveTimer(t.id, t.remainingSeconds)) {
+      final stateChanged = notifs.activeSignatureChanged(t);
+      final bucketChanged = notifs.activeBucketChanged(t);
+      if (stateChanged || bucketChanged) {
         unawaited(notifs.showActiveTimer(t));
         _notifiedActive.add(t.id);
       }
