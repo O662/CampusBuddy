@@ -100,8 +100,17 @@ class AppNotifications {
   }
 
   int _bucketForRemaining(int seconds) {
-    if (seconds >= 60) return 60 + (seconds ~/ 60); // bucket per minute
-    return seconds ~/ 10; // 0..5 in the final minute for finer feedback
+    // Above one minute: a bucket per whole minute. `(seconds - 1) ~/ 60`
+    // makes the boundary line up with the user's mental model — the body
+    // re-issues exactly as the countdown ticks from N+1 minutes to N
+    // (e.g. push at 4m, then 3m, then 2m).
+    if (seconds > 60) return 1000 + ((seconds - 1) ~/ 60);
+    // Final minute: only two more pushes — entering the last minute
+    // ("60s left"), then crossing 30s ("30s left"). The "Time's up"
+    // notification is fired separately by the engine on finish.
+    if (seconds > 30) return 2;
+    if (seconds > 0) return 1;
+    return 0;
   }
 
   Future<void> showActiveTimer(TimerItem t) async {
@@ -217,7 +226,9 @@ class AppNotifications {
       final m = (sec % 3600) ~/ 60;
       return m > 0 ? '${h}h ${m}m' : '${h}h';
     }
-    if (sec >= 60) return '${sec ~/ 60}m';
+    // 61+ seconds → "Nm". At exactly 60 we deliberately drop to "60s" so
+    // the final-minute notification reads the way the user expects.
+    if (sec > 60) return '${sec ~/ 60}m';
     return '${sec}s';
   }
 

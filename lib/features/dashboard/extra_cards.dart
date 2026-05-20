@@ -511,7 +511,8 @@ class QuickAddCard extends ConsumerWidget {
               () async {
             final t = await showTaskDialog(context,
                 folders: ref.read(foldersProvider),
-                courses: ref.read(coursesProvider));
+                courses: ref.read(coursesProvider),
+                categories: ref.read(gradeCategoriesProvider));
             if (t != null) ref.read(tasksProvider.notifier).save(t);
           }),
           tile(Icons.create_new_folder_outlined, 'Folder',

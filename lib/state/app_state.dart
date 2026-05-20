@@ -83,6 +83,11 @@ class FolderNotifier extends CollectionNotifier<TaskFolder> {
   Map<String, dynamic> encode(TaskFolder i) => i.toJson();
   @override
   TaskFolder decode(Map j) => TaskFolder.fromJson(j);
+
+  /// Persist [ordered] as the new sequence; positions are renumbered 0..n.
+  Future<void> reorder(List<TaskFolder> ordered) => upsertAll([
+        for (var i = 0; i < ordered.length; i++) ordered[i].copyWith(order: i),
+      ]);
 }
 
 class TaskNotifier extends CollectionNotifier<TaskItem> {
@@ -147,6 +152,7 @@ class TaskNotifier extends CollectionNotifier<TaskItem> {
         folderId: task.folderId,
         isAssignment: task.isAssignment,
         courseId: task.courseId,
+        categoryId: task.categoryId,
         estimatedMinutes: task.estimatedMinutes,
         recurrence: task.recurrence,
       );
@@ -155,16 +161,22 @@ class TaskNotifier extends CollectionNotifier<TaskItem> {
     }
   }
 
-  /// Remove a task; drop its placeholder grade only when still ungraded
-  /// (a real recorded score is kept as standalone academic history).
-  Future<void> delete(String id) async {
+  /// Remove a task. If the task mirrors a gradebook entry, [keepGrade]
+  /// decides whether to drop that entry too:
+  ///   - false (default) → delete the linked grade as well,
+  ///   - true            → leave the gradebook entry untouched as a
+  ///                        standalone item.
+  ///
+  /// The UI is expected to make this choice explicit when a linked grade
+  /// exists (see `confirmDeleteTaskWithGrade`). Tasks with no linked
+  /// grade ignore [keepGrade].
+  Future<void> delete(String id, {bool keepGrade = false}) async {
     final task = _byId(id);
     await remove(id);
     if (task == null) return;
     final g = _linkedGrade(id);
-    if (g != null && !g.isGraded) {
-      await ref.read(gradesProvider.notifier).remove(_gradeId(id));
-    }
+    if (g == null || keepGrade) return;
+    await ref.read(gradesProvider.notifier).remove(_gradeId(id));
   }
 
   Future<void> _syncGrade(TaskItem t) async {
@@ -173,9 +185,25 @@ class TaskNotifier extends CollectionNotifier<TaskItem> {
     final courseId = _resolveCourseId(t);
 
     if (t.isAssignment && courseId != null) {
+      // Validate the task's category still belongs to the resolved course.
+      // If the user switched class on the task and never reopened the
+      // picker, the stored id may no longer apply — fall back to whatever
+      // the Grades side already has, rather than writing a stale id.
+      String? taskCat = t.categoryId;
+      if (taskCat != null) {
+        final cats = ref.read(gradeCategoriesProvider);
+        final ok = cats.any(
+            (c) => c.id == taskCat && c.courseId == courseId);
+        if (!ok) taskCat = null;
+      }
+      // The task is the source of truth for placeholder category when it
+      // has one set; otherwise we keep whatever the Grades side recorded.
+      final mirroredCat = taskCat ?? existing?.categoryId;
+
       // Create an ungraded placeholder (earned == null → shows "—" and is
-      // left out of the average), or mirror title/class onto an existing
-      // entry without clobbering a score the user may have filled in.
+      // left out of the average), or mirror title/class/category onto an
+      // existing entry without clobbering a score the user may have
+      // filled in.
       await grades.upsert(GradeEntry(
         id: _gradeId(t.id),
         courseId: courseId,
@@ -184,9 +212,9 @@ class TaskNotifier extends CollectionNotifier<TaskItem> {
         total: existing?.total ?? 100,
         weight: existing?.weight ?? 1,
         date: existing?.date ?? t.due ?? DateTime.now(),
-        // Mirror only title/class — never clobber the score, category or
-        // extra credit the user filled in on the Grades side.
-        categoryId: existing?.categoryId,
+        categoryId: mirroredCat,
+        // Never clobber the score or extra-credit fields the user filled
+        // in on the Grades side.
         extraCredit: existing?.extraCredit ?? false,
         extraCreditIsPoints: existing?.extraCreditIsPoints ?? false,
         extraCreditValue: existing?.extraCreditValue,
@@ -229,6 +257,23 @@ class DeckNotifier extends CollectionNotifier<Deck> {
   Map<String, dynamic> encode(Deck i) => i.toJson();
   @override
   Deck decode(Map j) => Deck.fromJson(j);
+}
+
+class DeckGroupNotifier extends CollectionNotifier<DeckGroup> {
+  @override
+  String get boxName => LocalStore.deckGroups;
+  @override
+  String idOf(DeckGroup i) => i.id;
+  @override
+  Map<String, dynamic> encode(DeckGroup i) => i.toJson();
+  @override
+  DeckGroup decode(Map j) => DeckGroup.fromJson(j);
+
+  /// Persist [ordered] as the new sequence; positions are renumbered 0..n.
+  Future<void> reorder(List<DeckGroup> ordered) => upsertAll([
+        for (var i = 0; i < ordered.length; i++)
+          ordered[i].copyWith(order: i),
+      ]);
 }
 
 class CardNotifier extends CollectionNotifier<Flashcard> {
@@ -389,6 +434,9 @@ final eventsProvider =
     NotifierProvider<EventNotifier, List<EventItem>>(EventNotifier.new);
 final decksProvider =
     NotifierProvider<DeckNotifier, List<Deck>>(DeckNotifier.new);
+final deckGroupsProvider =
+    NotifierProvider<DeckGroupNotifier, List<DeckGroup>>(
+        DeckGroupNotifier.new);
 final cardsProvider =
     NotifierProvider<CardNotifier, List<Flashcard>>(CardNotifier.new);
 final notesProvider =
@@ -420,6 +468,29 @@ class TimerRecentsNotifier extends Notifier<List<int>> {
 final timerRecentsProvider =
     NotifierProvider<TimerRecentsNotifier, List<int>>(
         TimerRecentsNotifier.new);
+
+/// The two layouts the To-do page supports.
+enum TodoViewMode { grid, list }
+
+/// Persists the user's chosen To-do layout to the settings box so it sticks
+/// across sessions.
+class TodoViewModeNotifier extends Notifier<TodoViewMode> {
+  @override
+  TodoViewMode build() {
+    final raw = ref.read(localStoreProvider).readTodoViewMode();
+    return raw == 'list' ? TodoViewMode.list : TodoViewMode.grid;
+  }
+
+  Future<void> set(TodoViewMode mode) async {
+    if (state == mode) return;
+    await ref.read(localStoreProvider).writeTodoViewMode(mode.name);
+    state = mode;
+  }
+}
+
+final todoViewModeProvider =
+    NotifierProvider<TodoViewModeNotifier, TodoViewMode>(
+        TodoViewModeNotifier.new);
 
 /// Live snapshot driving per-second redraws of running timers plus the set
 /// of timers currently ringing.
@@ -503,10 +574,13 @@ class TimerEngine extends Notifier<TimerEngineState> {
   void _syncNotifications(List<TimerItem> timers) {
     final notifs = AppNotifications.instance;
 
-    // What *should* be in the drawer right now.
+    // What *should* be in the drawer right now. Per-timer mute drops the
+    // timer out of both sets, so muting a running timer is enough to make
+    // the cleanup loop below cancel any notification it currently owns.
     final shouldBeActive = <String>{};
     final shouldBeDone = <String>{};
     for (final t in timers) {
+      if (!t.notify) continue;
       if (_alarming.contains(t.id)) {
         shouldBeDone.add(t.id);
       } else if (t.isRunning && !t.isFinished) {

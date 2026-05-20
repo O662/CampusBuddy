@@ -26,6 +26,7 @@ class LocalStore {
   static const blocks = 'blocks';
   static const events = 'events';
   static const decks = 'decks';
+  static const deckGroups = 'deckGroups';
   static const cards = 'cards';
   static const notes = 'notes';
   static const timers = 'timers';
@@ -45,6 +46,7 @@ class LocalStore {
     blocks,
     events,
     decks,
+    deckGroups,
     cards,
     notes,
     timers,
@@ -104,6 +106,17 @@ class LocalStore {
   Future<void> writeTimerRecents(List<int> seconds) =>
       box(settings).put('timerRecents', seconds);
 
+  /// Which layout the To-do page should open in: `'grid'` (the masonry of
+  /// folder cards) or `'list'` (left folder list + right detail pane). The
+  /// page falls back to grid if the stored value is missing or unrecognised.
+  String readTodoViewMode() {
+    final raw = box(settings).get('todoViewMode');
+    return raw is String ? raw : 'grid';
+  }
+
+  Future<void> writeTodoViewMode(String mode) =>
+      box(settings).put('todoViewMode', mode);
+
   /// Populate a friendly starter dataset the first time the app runs so the
   /// dashboard, planner and study pages have something to show.
   Future<void> _seedIfFirstRun() async {
@@ -161,12 +174,12 @@ class LocalStore {
 
     // Folders, two of them linked to a class so assignment tasks filed
     // there route their grade automatically.
-    final csFolder =
-        TaskFolder(id: newId(), name: 'Algorithms', courseId: cs.id);
-    final histFolder =
-        TaskFolder(id: newId(), name: 'World History', courseId: hist.id);
-    final personalFolder =
-        TaskFolder(id: newId(), name: 'Personal', colorSeed: 4);
+    final csFolder = TaskFolder(
+        id: newId(), name: 'Algorithms', courseId: cs.id, order: 0);
+    final histFolder = TaskFolder(
+        id: newId(), name: 'World History', courseId: hist.id, order: 1);
+    final personalFolder = TaskFolder(
+        id: newId(), name: 'Personal', colorSeed: 4, order: 2);
     for (final f in [csFolder, histFolder, personalFolder]) {
       await box(folders).put(f.id, f.toJson());
     }

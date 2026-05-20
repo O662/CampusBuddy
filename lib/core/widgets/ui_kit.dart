@@ -148,6 +148,11 @@ class PageBody extends StatelessWidget {
 }
 
 /// Styled glass dialog wrapper.
+///
+/// Title and action row stay pinned; the [content] region scrolls when a
+/// dialog's fields outgrow the viewport (otherwise tall dialogs overflow
+/// on small windows). All dialogs in the app share this wrapper so the
+/// scroll affordance is automatic.
 Future<T?> showGlassDialog<T>(
   BuildContext context, {
   required String title,
@@ -173,7 +178,13 @@ Future<T?> showGlassDialog<T>(
                       .titleLarge
                       ?.copyWith(fontWeight: FontWeight.w700)),
               const SizedBox(height: 18),
-              content,
+              Flexible(
+                child: SingleChildScrollView(
+                  // Lets touch / trackpad scroll the content area without
+                  // the caller having to wrap their own fields.
+                  child: content,
+                ),
+              ),
               const SizedBox(height: 22),
               Builder(
                 builder: (dialogContext) {
@@ -349,6 +360,53 @@ Future<bool> confirmDelete(
     ],
   );
   return result ?? false;
+}
+
+/// Three-way confirmation for deleting a task that also lives in the
+/// gradebook. Returns:
+///   - `null`  — user cancelled,
+///   - `true`  — delete the task AND remove its gradebook entry,
+///   - `false` — delete the task only, keep the gradebook entry as a
+///               standalone item.
+///
+/// Use plain [confirmDelete] when the task has no linked grade — this
+/// dialog has nothing extra to ask about in that case.
+Future<bool?> confirmDeleteTaskWithGrade(
+  BuildContext context, {
+  required String taskTitle,
+  required String courseName,
+  required bool hasScore,
+}) {
+  final body = hasScore
+      ? 'A score is already recorded under $courseName. Keep that '
+          'gradebook entry, or remove both?'
+      : 'A placeholder is tracked under $courseName. Keep that '
+          'gradebook entry, or remove both?';
+  return showGlassDialog<bool>(
+    context,
+    title: 'Delete "$taskTitle"?',
+    content: Text(body,
+        style: const TextStyle(
+            color: AppPalette.textSecondary, height: 1.4)),
+    actions: (dialogContext) => [
+      TextButton(
+        onPressed: () => Navigator.pop(dialogContext),
+        child: const Text('Cancel'),
+      ),
+      FilledButton.tonal(
+        onPressed: () => Navigator.pop(dialogContext, false),
+        child: const Text('Keep grade'),
+      ),
+      FilledButton(
+        style: FilledButton.styleFrom(
+          backgroundColor: AppPalette.danger,
+          foregroundColor: const Color(0xFF15132B),
+        ),
+        onPressed: () => Navigator.pop(dialogContext, true),
+        child: const Text('Remove both'),
+      ),
+    ],
+  );
 }
 
 String hhmm(int minutes) {

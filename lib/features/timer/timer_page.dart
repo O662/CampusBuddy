@@ -575,12 +575,15 @@ class _TimerCardState extends ConsumerState<_TimerCard> {
                     _editDuration();
                   } else if (v == 'popout') {
                     popOutTimer(context, t.id);
+                  } else if (v == 'mute') {
+                    _save(t.copyWith(
+                        notify: !t.notify, updatedAt: DateTime.now()));
                   } else if (v == 'delete') {
                     _delete();
                   }
                 },
-                itemBuilder: (_) => const [
-                  PopupMenuItem(
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
                     value: 'edit',
                     child: ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -588,7 +591,7 @@ class _TimerCardState extends ConsumerState<_TimerCard> {
                       title: Text('Edit duration'),
                     ),
                   ),
-                  PopupMenuItem(
+                  const PopupMenuItem(
                     value: 'popout',
                     child: ListTile(
                       contentPadding: EdgeInsets.zero,
@@ -597,6 +600,21 @@ class _TimerCardState extends ConsumerState<_TimerCard> {
                     ),
                   ),
                   PopupMenuItem(
+                    value: 'mute',
+                    child: ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        t.notify
+                            ? Icons.notifications_off_outlined
+                            : Icons.notifications_active_outlined,
+                        size: 20,
+                      ),
+                      title: Text(t.notify
+                          ? 'Mute notifications'
+                          : 'Turn on notifications'),
+                    ),
+                  ),
+                  const PopupMenuItem(
                     value: 'delete',
                     child: ListTile(
                       contentPadding: EdgeInsets.zero,

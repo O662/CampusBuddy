@@ -173,7 +173,8 @@ class _PlannerPageState extends ConsumerState<PlannerPage> {
           onTap: () async {
             final t = await showTaskDialog(context,
                 folders: ref.read(foldersProvider),
-                courses: ref.read(coursesProvider));
+                courses: ref.read(coursesProvider),
+                categories: ref.read(gradeCategoriesProvider));
             if (t != null) ref.read(tasksProvider.notifier).save(t);
           },
         ),
@@ -556,7 +557,10 @@ class _AgendaRow extends ConsumerWidget {
     return InkWell(
       onTap: () async {
         final upd = await showTaskDialog(context,
-            existing: t, folders: folders, courses: courses);
+            existing: t,
+            folders: folders,
+            courses: courses,
+            categories: ref.read(gradeCategoriesProvider));
         if (upd != null) ref.read(tasksProvider.notifier).save(upd);
       },
       child: Padding(

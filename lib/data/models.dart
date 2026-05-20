@@ -423,6 +423,7 @@ class TaskFolder {
     required this.name,
     this.courseId,
     this.colorSeed = 0,
+    this.order = 0,
   });
 
   final String id;
@@ -432,6 +433,9 @@ class TaskFolder {
   final String? courseId;
   final int colorSeed;
 
+  /// Manual sort position on the To-do board (drag-to-reorder).
+  final int order;
+
   Color get color => AppPalette.swatchFor(colorSeed);
 
   TaskFolder copyWith({
@@ -439,12 +443,14 @@ class TaskFolder {
     String? courseId,
     bool clearCourse = false,
     int? colorSeed,
+    int? order,
   }) =>
       TaskFolder(
         id: id,
         name: name ?? this.name,
         courseId: clearCourse ? null : (courseId ?? this.courseId),
         colorSeed: colorSeed ?? this.colorSeed,
+        order: order ?? this.order,
       );
 
   Map<String, dynamic> toJson() => {
@@ -452,6 +458,7 @@ class TaskFolder {
         'name': name,
         'courseId': courseId,
         'colorSeed': colorSeed,
+        'order': order,
       };
 
   factory TaskFolder.fromJson(Map json) => TaskFolder(
@@ -459,6 +466,7 @@ class TaskFolder {
         name: json['name'] as String,
         courseId: json['courseId'] as String?,
         colorSeed: (json['colorSeed'] as num?)?.toInt() ?? 0,
+        order: (json['order'] as num?)?.toInt() ?? 0,
       );
 }
 
@@ -477,6 +485,7 @@ class TaskItem {
     this.folderId,
     this.isAssignment = false,
     this.courseId,
+    this.categoryId,
     this.estimatedMinutes = 60,
     this.recurrence = Recurrence.none,
   });
@@ -498,6 +507,11 @@ class TaskItem {
   /// linked course when null (resolved in state, not here).
   final String? courseId;
 
+  /// Optional [GradeCategory.id] to file the placeholder grade under (e.g.
+  /// "Exams" vs "Homework"). Ignored unless [isAssignment] is true and the
+  /// category belongs to the resolved course.
+  final String? categoryId;
+
   /// Rough effort estimate — drives the default block length on the planner.
   final int estimatedMinutes;
 
@@ -515,6 +529,8 @@ class TaskItem {
     bool? isAssignment,
     String? courseId,
     bool clearCourse = false,
+    String? categoryId,
+    bool clearCategory = false,
     int? estimatedMinutes,
     Recurrence? recurrence,
   }) =>
@@ -528,6 +544,8 @@ class TaskItem {
         folderId: clearFolder ? null : (folderId ?? this.folderId),
         isAssignment: isAssignment ?? this.isAssignment,
         courseId: clearCourse ? null : (courseId ?? this.courseId),
+        categoryId:
+            clearCategory ? null : (categoryId ?? this.categoryId),
         estimatedMinutes: estimatedMinutes ?? this.estimatedMinutes,
         recurrence: recurrence ?? this.recurrence,
       );
@@ -542,6 +560,7 @@ class TaskItem {
         'folderId': folderId,
         'isAssignment': isAssignment,
         'courseId': courseId,
+        'categoryId': categoryId,
         'estimatedMinutes': estimatedMinutes,
         'recurrence': recurrence.index,
       };
@@ -559,6 +578,7 @@ class TaskItem {
         folderId: json['folderId'] as String?,
         isAssignment: json['isAssignment'] as bool? ?? false,
         courseId: json['courseId'] as String?,
+        categoryId: json['categoryId'] as String?,
         estimatedMinutes: (json['estimatedMinutes'] as num?)?.toInt() ?? 60,
         recurrence:
             _enum(Recurrence.values, json['recurrence'], Recurrence.none),
@@ -680,12 +700,62 @@ class EventItem {
       );
 }
 
+/// A user-defined cluster of decks (e.g. "Biology", "Math 101"). Decks
+/// reference their group by id via [Deck.groupId]; a null/missing id
+/// drops the deck into the "Ungrouped" section at the bottom of the
+/// study page. Groups are ordered manually so the user can pin their
+/// active class to the top.
+class DeckGroup {
+  const DeckGroup({
+    required this.id,
+    required this.name,
+    this.colorSeed = 0,
+    this.order = 0,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String name;
+  final int colorSeed;
+  final int order;
+  final DateTime createdAt;
+
+  Color get color => AppPalette.swatchFor(colorSeed);
+
+  DeckGroup copyWith({String? name, int? colorSeed, int? order}) =>
+      DeckGroup(
+        id: id,
+        name: name ?? this.name,
+        colorSeed: colorSeed ?? this.colorSeed,
+        order: order ?? this.order,
+        createdAt: createdAt,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'colorSeed': colorSeed,
+        'order': order,
+        'createdAt': createdAt.millisecondsSinceEpoch,
+      };
+
+  factory DeckGroup.fromJson(Map json) => DeckGroup(
+        id: json['id'] as String,
+        name: json['name'] as String,
+        colorSeed: (json['colorSeed'] as num?)?.toInt() ?? 0,
+        order: (json['order'] as num?)?.toInt() ?? 0,
+        createdAt:
+            DateTime.fromMillisecondsSinceEpoch(json['createdAt'] as int),
+      );
+}
+
 class Deck {
   const Deck({
     required this.id,
     required this.name,
     this.description = '',
     this.colorSeed = 0,
+    this.groupId,
     required this.createdAt,
   });
 
@@ -693,15 +763,30 @@ class Deck {
   final String name;
   final String description;
   final int colorSeed;
+
+  /// Optional [DeckGroup.id]. Decks with no group (or a stale id whose
+  /// group was deleted) render under the "Ungrouped" section.
+  final String? groupId;
   final DateTime createdAt;
 
   Color get color => AppPalette.swatchFor(colorSeed);
 
-  Deck copyWith({String? name, String? description, int? colorSeed}) => Deck(
+  /// Pass `clearGroup: true` to drop the deck back to the Ungrouped
+  /// section — needed because a null `groupId` argument can't be told
+  /// apart from "leave it alone".
+  Deck copyWith({
+    String? name,
+    String? description,
+    int? colorSeed,
+    String? groupId,
+    bool clearGroup = false,
+  }) =>
+      Deck(
         id: id,
         name: name ?? this.name,
         description: description ?? this.description,
         colorSeed: colorSeed ?? this.colorSeed,
+        groupId: clearGroup ? null : (groupId ?? this.groupId),
         createdAt: createdAt,
       );
 
@@ -710,6 +795,7 @@ class Deck {
         'name': name,
         'description': description,
         'colorSeed': colorSeed,
+        'groupId': groupId,
         'createdAt': createdAt.millisecondsSinceEpoch,
       };
 
@@ -718,34 +804,59 @@ class Deck {
         name: json['name'] as String,
         description: json['description'] as String? ?? '',
         colorSeed: (json['colorSeed'] as num?)?.toInt() ?? 0,
+        groupId: json['groupId'] as String?,
         createdAt:
             DateTime.fromMillisecondsSinceEpoch(json['createdAt'] as int),
       );
 }
 
 /// A flashcard with Leitner spaced-repetition state (box 1..5).
+///
+/// `front`/`back` are plain text with a small markdown subset (bold,
+/// italic, code, bullet/numbered lists) — rendered by `MarkdownText`.
+/// Optional `frontImagePath`/`backImagePath` are filenames inside the
+/// app-support `card_images/` directory; the `CardImageStore` resolves
+/// them to absolute paths for display. `correctCount`/`wrongCount` are
+/// lifetime tallies used to surface "trouble cards" the user is missing
+/// most often.
 class Flashcard {
   const Flashcard({
     required this.id,
     required this.deckId,
     required this.front,
     required this.back,
+    this.frontImagePath,
+    this.backImagePath,
     this.box = 1,
     DateTime? nextDue,
     this.lastReviewed,
+    this.correctCount = 0,
+    this.wrongCount = 0,
   }) : _nextDue = nextDue;
 
   final String id;
   final String deckId;
   final String front;
   final String back;
+  final String? frontImagePath;
+  final String? backImagePath;
   final int box;
   final DateTime? _nextDue;
   final DateTime? lastReviewed;
+  final int correctCount;
+  final int wrongCount;
 
   DateTime get nextDue =>
       _nextDue ?? DateTime.fromMillisecondsSinceEpoch(0);
   bool get isDue => !nextDue.isAfter(DateTime.now());
+
+  /// Total times this card has been graded — anchors miss-rate math.
+  int get reviewCount => correctCount + wrongCount;
+
+  /// Share of reviews that were wrong. Returns 0 when never reviewed so
+  /// new cards aren't accidentally flagged as "trouble".
+  double get missRate =>
+      reviewCount == 0 ? 0 : wrongCount / reviewCount;
 
   /// Leitner intervals in days per box.
   static const _intervals = [0, 1, 3, 7, 16, 35];
@@ -758,20 +869,43 @@ class Flashcard {
       deckId: deckId,
       front: front,
       back: back,
+      frontImagePath: frontImagePath,
+      backImagePath: backImagePath,
       box: newBox,
       lastReviewed: now,
       nextDue: now.add(Duration(days: _intervals[newBox])),
+      correctCount: correctCount + (correct ? 1 : 0),
+      wrongCount: wrongCount + (correct ? 0 : 1),
     );
   }
 
-  Flashcard copyWith({String? front, String? back}) => Flashcard(
+  /// Pass `clearFrontImage: true` / `clearBackImage: true` to drop an
+  /// existing attachment — needed because nullable copyWith params can't
+  /// distinguish "leave as is" from "set to null".
+  Flashcard copyWith({
+    String? front,
+    String? back,
+    String? frontImagePath,
+    String? backImagePath,
+    bool clearFrontImage = false,
+    bool clearBackImage = false,
+  }) =>
+      Flashcard(
         id: id,
         deckId: deckId,
         front: front ?? this.front,
         back: back ?? this.back,
+        frontImagePath: clearFrontImage
+            ? null
+            : (frontImagePath ?? this.frontImagePath),
+        backImagePath: clearBackImage
+            ? null
+            : (backImagePath ?? this.backImagePath),
         box: box,
         nextDue: _nextDue,
         lastReviewed: lastReviewed,
+        correctCount: correctCount,
+        wrongCount: wrongCount,
       );
 
   Map<String, dynamic> toJson() => {
@@ -779,9 +913,13 @@ class Flashcard {
         'deckId': deckId,
         'front': front,
         'back': back,
+        'frontImagePath': frontImagePath,
+        'backImagePath': backImagePath,
         'box': box,
         'nextDue': _nextDue?.millisecondsSinceEpoch,
         'lastReviewed': lastReviewed?.millisecondsSinceEpoch,
+        'correctCount': correctCount,
+        'wrongCount': wrongCount,
       };
 
   factory Flashcard.fromJson(Map json) => Flashcard(
@@ -789,6 +927,8 @@ class Flashcard {
         deckId: json['deckId'] as String,
         front: json['front'] as String,
         back: json['back'] as String,
+        frontImagePath: json['frontImagePath'] as String?,
+        backImagePath: json['backImagePath'] as String?,
         box: (json['box'] as num?)?.toInt() ?? 1,
         nextDue: json['nextDue'] == null
             ? null
@@ -797,6 +937,8 @@ class Flashcard {
             ? null
             : DateTime.fromMillisecondsSinceEpoch(
                 json['lastReviewed'] as int),
+        correctCount: (json['correctCount'] as num?)?.toInt() ?? 0,
+        wrongCount: (json['wrongCount'] as num?)?.toInt() ?? 0,
       );
 }
 
@@ -1203,6 +1345,7 @@ class TimerItem {
     this.order = 0,
     this.endsAt,
     this.pausedRemaining,
+    this.notify = true,
     required this.updatedAt,
   });
 
@@ -1221,6 +1364,11 @@ class TimerItem {
 
   /// Seconds left when paused mid-run. Non-null **iff** paused.
   final int? pausedRemaining;
+
+  /// Per-timer mute. When false, the OS-drawer notification (both
+  /// "active" countdown and "Time's up") is skipped — the in-app dial,
+  /// pop-out window and audio alarm still work normally.
+  final bool notify;
   final DateTime updatedAt;
 
   Color get color => AppPalette.swatchFor(colorSeed);
@@ -1250,6 +1398,7 @@ class TimerItem {
     bool clearEndsAt = false,
     int? pausedRemaining,
     bool clearPausedRemaining = false,
+    bool? notify,
     DateTime? updatedAt,
   }) =>
       TimerItem(
@@ -1262,6 +1411,7 @@ class TimerItem {
         pausedRemaining: clearPausedRemaining
             ? null
             : (pausedRemaining ?? this.pausedRemaining),
+        notify: notify ?? this.notify,
         updatedAt: updatedAt ?? this.updatedAt,
       );
 
@@ -1294,6 +1444,7 @@ class TimerItem {
         'order': order,
         'endsAt': endsAt?.millisecondsSinceEpoch,
         'pausedRemaining': pausedRemaining,
+        'notify': notify,
         'updatedAt': updatedAt.millisecondsSinceEpoch,
       };
 
@@ -1307,6 +1458,8 @@ class TimerItem {
             ? null
             : DateTime.fromMillisecondsSinceEpoch(json['endsAt'] as int),
         pausedRemaining: (json['pausedRemaining'] as num?)?.toInt(),
+        // Legacy timers (saved before the toggle existed) default to on.
+        notify: json['notify'] as bool? ?? true,
         updatedAt: json['updatedAt'] == null
             ? DateTime.fromMillisecondsSinceEpoch(0)
             : DateTime.fromMillisecondsSinceEpoch(json['updatedAt'] as int),
