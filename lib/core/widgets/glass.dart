@@ -114,28 +114,63 @@ class GlassCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final titleText = Text(
+      title,
+      style: theme.textTheme.titleMedium
+          ?.copyWith(fontWeight: FontWeight.w600),
+    );
+
+    /// Below this width the trailing widget moves under the title row.
+    /// The trailing is allowed to claim its intrinsic width — fine in a
+    /// roomy card, but in a 3-column grid each cell can drop to ~200px,
+    /// at which point a chip / dropdown / button pair pushes the row
+    /// past its constraints. Stacking sidesteps that without trying to
+    /// magic-shrink whatever the caller passed in.
+    /// Only paid for when there's a trailing — a LayoutBuilder in the
+    /// header would otherwise crash inside an [IntrinsicHeight] row
+    /// (see [CourseDetailPage]'s equal-height columns).
+    const stackBelow = 320.0;
+
+    final iconAndTitle = Row(
+      children: [
+        if (icon != null) ...[
+          Icon(icon, size: 18, color: AppPalette.lavender),
+          const SizedBox(width: 8),
+        ],
+        Expanded(child: titleText),
+      ],
+    );
+    final Widget header = trailing == null
+        ? iconAndTitle
+        : LayoutBuilder(
+            builder: (context, c) {
+              if (c.maxWidth < stackBelow) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    iconAndTitle,
+                    const SizedBox(height: 10),
+                    Align(
+                        alignment: Alignment.centerRight,
+                        child: trailing!),
+                  ],
+                );
+              }
+              return Row(
+                children: [
+                  Expanded(child: iconAndTitle),
+                  trailing!,
+                ],
+              );
+            },
+          );
+
     return GlassContainer(
       padding: padding,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              if (icon != null) ...[
-                Icon(icon, size: 18, color: AppPalette.lavender),
-                const SizedBox(width: 8),
-              ],
-              Expanded(
-                child: Text(
-                  title,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              ?trailing,
-            ],
-          ),
+          header,
           const SizedBox(height: 16),
           child,
         ],

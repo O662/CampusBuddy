@@ -26,7 +26,7 @@ DateTime _weekStart(DateTime d) {
 }
 
 /// Which calendar the planner's main panel shows.
-enum _PlannerView { week, month }
+enum _PlannerView { week, month, gantt }
 
 /// One thing happening on a day — either a calendar [event] or a due
 /// [task]/assignment. Used for the calendars' markers and the month
@@ -141,9 +141,14 @@ class _PlannerPageState extends ConsumerState<PlannerPage> {
   Widget build(BuildContext context) {
     return PageBody(
       title: 'Planner',
-      subtitle: _view == _PlannerView.week
-          ? 'Drag a to-do onto a day, then slide it to block out time.'
-          : 'Your month at a glance — tap a day to see and edit its events.',
+      subtitle: switch (_view) {
+        _PlannerView.week =>
+          'Drag a to-do onto a day, then slide it to block out time.',
+        _PlannerView.month =>
+          'Your month at a glance — tap a day to see and edit its events.',
+        _PlannerView.gantt =>
+          'Each bar shows how long a task has to land — tap a bar to edit.',
+      },
       scrollable: false,
       actions: [
         SoftButton(
@@ -184,23 +189,32 @@ class _PlannerPageState extends ConsumerState<PlannerPage> {
           final narrow = c.maxWidth < 980;
           // When narrow the whole page scrolls, so the panel must not
           // introduce its own (unbounded) scroll view inside it.
-          final side = _SidePanel(scroll: !narrow);
-          final Widget main = _view == _PlannerView.week
-              ? _WeekView(weekStart: _weekStartDay)
-              : _MonthView(
-                  focusedDay: _focusedDay,
-                  onDaySelected: _selectDay,
-                );
+          // The to-do backlog is only useful in Week view, where rows are
+          // drop targets for scheduling time blocks. Month and Gantt have
+          // no drop behaviour, so hide it and give the main area full width.
+          final showSide = _view == _PlannerView.week;
+          final Widget main = switch (_view) {
+            _PlannerView.week => _WeekView(weekStart: _weekStartDay),
+            _PlannerView.month => _MonthView(
+                focusedDay: _focusedDay,
+                onDaySelected: _selectDay,
+              ),
+            _PlannerView.gantt => const _GanttView(),
+          };
           if (narrow) {
+            final mainHeight = switch (_view) {
+              _PlannerView.week => 560.0,
+              _PlannerView.month => 660.0,
+              _PlannerView.gantt => 620.0,
+            };
             return SingleChildScrollView(
               child: Column(
                 children: [
-                  side,
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    height: _view == _PlannerView.week ? 560 : 660,
-                    child: main,
-                  ),
+                  if (showSide) ...[
+                    _SidePanel(scroll: false),
+                    const SizedBox(height: 16),
+                  ],
+                  SizedBox(height: mainHeight, child: main),
                 ],
               ),
             );
@@ -208,8 +222,10 @@ class _PlannerPageState extends ConsumerState<PlannerPage> {
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SizedBox(width: 320, child: side),
-              const SizedBox(width: 16),
+              if (showSide) ...[
+                const SizedBox(width: 320, child: _SidePanel()),
+                const SizedBox(width: 16),
+              ],
               Expanded(child: main),
             ],
           );
@@ -268,6 +284,7 @@ class _ViewToggle extends StatelessWidget {
         children: [
           seg('Week', Icons.view_week_rounded, _PlannerView.week),
           seg('Month', Icons.calendar_month_rounded, _PlannerView.month),
+          seg('Gantt', Icons.view_timeline_rounded, _PlannerView.gantt),
         ],
       ),
     );
@@ -1003,4 +1020,955 @@ class _BlockWidgetState extends State<_BlockWidget> {
       ],
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Right (Gantt view): horizontally-scrolling chart of every open due task,
+// drawn as a bar from plannedStart (or createdAt) → due. Three sort modes;
+// in Manual mode rows are draggable to reorder. Drag a bar's left edge to
+// set its planned start; tap the bar to open the task editor.
+// ---------------------------------------------------------------------------
+
+/// How rows are arranged in the Gantt. Manual is the only mode that allows
+/// drag-to-reorder; the other two recompute order on every build.
+enum _GanttSortMode {
+  manual('Manual', Icons.drag_handle_rounded),
+  byClass('Class', Icons.school_outlined),
+  byDueDate('Due date', Icons.event_rounded);
+
+  const _GanttSortMode(this.label, this.icon);
+  final String label;
+  final IconData icon;
+}
+
+/// Course or folder name a task rolls up under in the Gantt's left column.
+/// Null means the task is unfiled, in which case the bar still appears but
+/// without a group label.
+String? _ganttGroupName(
+  TaskItem t,
+  Map<String, Course> courses,
+  List<TaskFolder> folders,
+) {
+  var courseId = t.courseId;
+  TaskFolder? folder;
+  for (final f in folders) {
+    if (f.id == t.folderId) folder = f;
+  }
+  courseId ??= folder?.courseId;
+  if (courseId != null && courses[courseId] != null) {
+    return courses[courseId]!.name;
+  }
+  return folder?.name;
+}
+
+/// Apply [mode] to a copy of [tasks] in place. Manual mode puts tasks the
+/// user has explicitly placed (`ganttOrder > 0`) first, then untouched ones
+/// in due-date order — that way the very first reorder doesn't shuffle
+/// every unrelated row.
+void _sortGanttTasks(
+  List<TaskItem> tasks,
+  _GanttSortMode mode,
+  Map<String, Course> courses,
+  List<TaskFolder> folders,
+) {
+  tasks.sort((a, b) {
+    switch (mode) {
+      case _GanttSortMode.manual:
+        final aOrd = a.ganttOrder == 0 ? 1 << 30 : a.ganttOrder;
+        final bOrd = b.ganttOrder == 0 ? 1 << 30 : b.ganttOrder;
+        if (aOrd != bOrd) return aOrd.compareTo(bOrd);
+        return a.due!.compareTo(b.due!);
+      case _GanttSortMode.byClass:
+        final ga = _ganttGroupName(a, courses, folders) ?? '~';
+        final gb = _ganttGroupName(b, courses, folders) ?? '~';
+        final cmp = ga.toLowerCase().compareTo(gb.toLowerCase());
+        if (cmp != 0) return cmp;
+        return a.due!.compareTo(b.due!);
+      case _GanttSortMode.byDueDate:
+        return a.due!.compareTo(b.due!);
+    }
+  });
+}
+
+class _GanttView extends ConsumerStatefulWidget {
+  const _GanttView();
+
+  @override
+  ConsumerState<_GanttView> createState() => _GanttViewState();
+}
+
+class _GanttViewState extends ConsumerState<_GanttView> {
+  /// Window: a short look-back so just-overdue items stay visible, and a
+  /// generous look-ahead so a typical term's worth of work fits on one chart.
+  static const _daysBefore = 7;
+  static const _daysAfter = 84;
+  static const _dayWidth = 32.0;
+  static const _rowHeight = 38.0;
+  static const _headerHeight = 56.0;
+  static const _labelWidth = 220.0;
+
+  final _hHeader = ScrollController();
+  final _hBody = ScrollController();
+
+  late final DateTime _today = _midnight(DateTime.now());
+  late final DateTime _windowStart =
+      _today.subtract(const Duration(days: _daysBefore));
+  static const int _totalDays = _daysBefore + _daysAfter;
+
+  _GanttSortMode _sortMode = _GanttSortMode.manual;
+
+  @override
+  void initState() {
+    super.initState();
+    // Keep the date header visually pinned to the body's horizontal scroll.
+    // The header itself is NeverScrollable so the user can only drive scroll
+    // from the body region, and we mirror that offset up here.
+    _hBody.addListener(() {
+      if (!_hHeader.hasClients) return;
+      final target =
+          _hBody.offset.clamp(0.0, _hHeader.position.maxScrollExtent);
+      if (_hHeader.offset != target) _hHeader.jumpTo(target);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_hBody.hasClients) return;
+      // Scroll so "today" sits a little inset from the left edge.
+      final target = (_daysBefore * _dayWidth - 24)
+          .clamp(0.0, _hBody.position.maxScrollExtent);
+      _hBody.jumpTo(target);
+    });
+  }
+
+  @override
+  void dispose() {
+    _hHeader.dispose();
+    _hBody.dispose();
+    super.dispose();
+  }
+
+  /// Swap [srcId] into [dstIndex] of the currently visible [tasks] list and
+  /// persist the new manual order. Called from a label cell's DragTarget.
+  void _handleReorder(List<TaskItem> tasks, String srcId, int dstIndex) {
+    if (_sortMode != _GanttSortMode.manual) return;
+    final srcIndex = tasks.indexWhere((t) => t.id == srcId);
+    if (srcIndex == -1 || srcIndex == dstIndex) return;
+    final next = List<TaskItem>.from(tasks);
+    final moved = next.removeAt(srcIndex);
+    // When dragging downward the target index shifts left by 1 because the
+    // source has been removed above it; correct for that so the dropped row
+    // lands where the user actually pointed.
+    final insertAt = srcIndex < dstIndex ? dstIndex - 1 : dstIndex;
+    next.insert(insertAt.clamp(0, next.length), moved);
+    ref.read(tasksProvider.notifier).reorderGantt(next);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final courses = ref.watch(coursesByIdProvider);
+    final folders = ref.watch(foldersProvider);
+    final tasks = ref
+        .watch(tasksProvider)
+        .where((t) => !t.done && t.due != null)
+        .toList();
+    _sortGanttTasks(tasks, _sortMode, courses, folders);
+
+    const totalWidth = _totalDays * _dayWidth;
+
+    if (tasks.isEmpty) {
+      return GlassContainer(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Align(
+              alignment: Alignment.centerRight,
+              child: _GanttSortToggle(
+                mode: _sortMode,
+                onChanged: (m) => setState(() => _sortMode = m),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const EmptyHint(
+                'No open tasks with a due date yet. Add one to chart it. 📊'),
+          ],
+        ),
+      );
+    }
+
+    return GlassContainer(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        children: [
+          // Top bar: sort toggle on the right, a quick hint on the left when
+          // Manual is active so users know rows are draggable.
+          Padding(
+            padding: const EdgeInsets.only(left: 4, right: 2, bottom: 10),
+            child: Row(
+              children: [
+                if (_sortMode == _GanttSortMode.manual)
+                  const Expanded(
+                    child: Text(
+                      'Drag a row by its title to reorder.',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: AppPalette.textFaint,
+                      ),
+                    ),
+                  )
+                else
+                  const Spacer(),
+                _GanttSortToggle(
+                  mode: _sortMode,
+                  onChanged: (m) => setState(() => _sortMode = m),
+                ),
+              ],
+            ),
+          ),
+          // Header strip: fixed left "Task" cell + horizontally-scrolling
+          // month/day strip. The body drives the scroll; the header mirrors.
+          SizedBox(
+            height: _headerHeight,
+            child: Row(
+              children: [
+                Container(
+                  width: _labelWidth,
+                  alignment: Alignment.bottomLeft,
+                  padding:
+                      const EdgeInsets.only(left: 4, bottom: 8, right: 8),
+                  decoration: const BoxDecoration(
+                    border: Border(
+                      right: BorderSide(color: AppPalette.glassStroke),
+                      bottom: BorderSide(color: AppPalette.glassStroke),
+                    ),
+                  ),
+                  child: const Text(
+                    'Task',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: AppPalette.textSecondary,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: ClipRect(
+                    child: SingleChildScrollView(
+                      controller: _hHeader,
+                      scrollDirection: Axis.horizontal,
+                      physics: const NeverScrollableScrollPhysics(),
+                      child: SizedBox(
+                        width: totalWidth,
+                        height: _headerHeight,
+                        child: CustomPaint(
+                          painter: _GanttHeaderPainter(
+                            start: _windowStart,
+                            totalDays: _totalDays,
+                            dayWidth: _dayWidth,
+                            today: _today,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Body: a single vertical scroll, then inside it a row of
+          // [fixed labels | horizontal-scroll bars].
+          Expanded(
+            child: SingleChildScrollView(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: _labelWidth,
+                    decoration: const BoxDecoration(
+                      border: Border(
+                        right: BorderSide(color: AppPalette.glassStroke),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        for (var i = 0; i < tasks.length; i++)
+                          _GanttLabelCell(
+                            task: tasks[i],
+                            color: taskColor(tasks[i], courses, folders),
+                            groupName:
+                                _ganttGroupName(tasks[i], courses, folders),
+                            height: _rowHeight,
+                            draggable: _sortMode == _GanttSortMode.manual,
+                            onDropped: (srcId) =>
+                                _handleReorder(tasks, srcId, i),
+                          ),
+                      ],
+                    ),
+                  ),
+                  Expanded(
+                    child: ClipRect(
+                      child: SingleChildScrollView(
+                        controller: _hBody,
+                        scrollDirection: Axis.horizontal,
+                        child: SizedBox(
+                          width: totalWidth,
+                          child: Stack(
+                            children: [
+                              // Grid + weekend bands + today line, painted
+                              // once behind every row instead of per-row.
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: CustomPaint(
+                                    painter: _GanttGridPainter(
+                                      start: _windowStart,
+                                      totalDays: _totalDays,
+                                      dayWidth: _dayWidth,
+                                      today: _today,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  for (final t in tasks)
+                                    _GanttBarRow(
+                                      key: ValueKey(t.id),
+                                      task: t,
+                                      color: taskColor(t, courses, folders),
+                                      windowStart: _windowStart,
+                                      totalDays: _totalDays,
+                                      dayWidth: _dayWidth,
+                                      rowHeight: _rowHeight,
+                                      today: _today,
+                                      onTap: () => _editTask(t),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _editTask(TaskItem t) async {
+    final upd = await showTaskDialog(
+      context,
+      existing: t,
+      folders: ref.read(foldersProvider),
+      courses: ref.read(coursesProvider),
+      categories: ref.read(gradeCategoriesProvider),
+    );
+    if (upd != null) ref.read(tasksProvider.notifier).save(upd);
+  }
+}
+
+/// Three-segment pill toggle: Manual / Class / Due date. Visually matches
+/// the Week/Month/Gantt toggle but a touch smaller so it sits inside the
+/// chart card without crowding it.
+class _GanttSortToggle extends StatelessWidget {
+  const _GanttSortToggle({required this.mode, required this.onChanged});
+
+  final _GanttSortMode mode;
+  final ValueChanged<_GanttSortMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget seg(_GanttSortMode m) {
+      final sel = mode == m;
+      final fg = sel ? const Color(0xFF15132B) : AppPalette.textSecondary;
+      return GestureDetector(
+        onTap: () => onChanged(m),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: sel ? AppPalette.accent : Colors.transparent,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(m.icon, size: 13, color: fg),
+              const SizedBox(width: 5),
+              Text(
+                m.label,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: fg,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: AppPalette.glassStroke),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final m in _GanttSortMode.values) seg(m),
+        ],
+      ),
+    );
+  }
+}
+
+/// Left-column cell for one Gantt row: task title + course/folder subtitle,
+/// with a thin color tab tying it to its bar. In Manual sort mode the cell
+/// is both a Draggable (source) and a DragTarget (destination) so the user
+/// can drag any row onto any other row to reorder; outside Manual mode the
+/// cell is inert.
+class _GanttLabelCell extends StatelessWidget {
+  const _GanttLabelCell({
+    required this.task,
+    required this.color,
+    required this.groupName,
+    required this.height,
+    required this.draggable,
+    required this.onDropped,
+  });
+
+  final TaskItem task;
+  final Color color;
+  final String? groupName;
+  final double height;
+
+  /// When false the cell is a plain row — no drag source, no drop target.
+  final bool draggable;
+
+  /// Called when another row was dropped onto this one, carrying the
+  /// source task id. The parent rebuilds the manual order from it.
+  final ValueChanged<String> onDropped;
+
+  @override
+  Widget build(BuildContext context) {
+    final Widget content = Container(
+      height: height,
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom:
+              BorderSide(color: AppPalette.glassStroke.withValues(alpha: 0.5)),
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: height - 14,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (draggable) ...[
+            const Icon(
+              Icons.drag_indicator_rounded,
+              size: 14,
+              color: AppPalette.textFaint,
+            ),
+            const SizedBox(width: 4),
+          ],
+          Icon(
+            task.isAssignment ? Icons.school_rounded : Icons.flag_outlined,
+            size: 14,
+            color: color,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  task.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    height: 1.15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (groupName != null)
+                  Text(
+                    groupName!,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      height: 1.15,
+                      color: AppPalette.textSecondary,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (!draggable) return content;
+
+    // Drag feedback shows a tinted floating copy of the row so the user
+    // sees what they're carrying. Use the row's color for the fill so the
+    // visual line back to the bar in the chart stays obvious.
+    final feedback = Material(
+      color: Colors.transparent,
+      child: SizedBox(
+        width: 220,
+        child: Container(
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.22),
+            border: Border.all(color: color.withValues(alpha: 0.6)),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: content,
+        ),
+      ),
+    );
+
+    return DragTarget<String>(
+      onWillAcceptWithDetails: (d) => d.data != task.id,
+      onAcceptWithDetails: (d) => onDropped(d.data),
+      builder: (context, candidate, _) {
+        final hovering = candidate.isNotEmpty;
+        // Stack the hover indicators on top of the row so they paint over
+        // it without taking layout space — the cell stays exactly [height]
+        // tall so it lines up with the bars column on the right.
+        return AdaptiveDraggable<String>(
+          data: task.id,
+          dragAnchorStrategy: pointerDragAnchorStrategy,
+          feedback: feedback,
+          childWhenDragging: Opacity(opacity: 0.35, child: content),
+          child: SizedBox(
+            height: height,
+            child: Stack(
+              children: [
+                content,
+                if (hovering) ...[
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: ColoredBox(
+                        color: AppPalette.accent.withValues(alpha: 0.18),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: 0,
+                    height: 2,
+                    child: IgnorePointer(
+                      child: ColoredBox(color: AppPalette.accent),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// One Gantt row: a horizontal bar from the task's planned start (or its
+/// createdAt fallback) to its due date, clipped to the visible window. The
+/// bar's left edge is a drag handle that adjusts `plannedStart`; tapping
+/// anywhere else opens the task editor. Overdue tasks get a red outline.
+class _GanttBarRow extends ConsumerStatefulWidget {
+  const _GanttBarRow({
+    super.key,
+    required this.task,
+    required this.color,
+    required this.windowStart,
+    required this.totalDays,
+    required this.dayWidth,
+    required this.rowHeight,
+    required this.today,
+    required this.onTap,
+  });
+
+  final TaskItem task;
+  final Color color;
+  final DateTime windowStart;
+  final int totalDays;
+  final double dayWidth;
+  final double rowHeight;
+  final DateTime today;
+  final VoidCallback onTap;
+
+  @override
+  ConsumerState<_GanttBarRow> createState() => _GanttBarRowState();
+}
+
+class _GanttBarRowState extends ConsumerState<_GanttBarRow> {
+  /// Un-snapped start in pixel-days while a drag is active; null otherwise.
+  /// Tracking the un-snapped value lets the left edge follow the cursor
+  /// smoothly; the snapped value is committed once on release.
+  double? _liveStartPx;
+
+  /// Start of the bar after snapping, derived from [_liveStartPx]. Clamped
+  /// to the visible window on the left and one day before due on the right
+  /// so the bar always has visible length.
+  DateTime get _snappedLiveStart {
+    final due = _midnight(widget.task.due!);
+    final snappedDayIdx = (_liveStartPx! / widget.dayWidth).round();
+    final windowEndIdx = widget.totalDays - 1;
+    final maxIdx = due.difference(widget.windowStart).inDays;
+    final clampedIdx = snappedDayIdx
+        .clamp(0, (maxIdx < windowEndIdx ? maxIdx : windowEndIdx));
+    return widget.windowStart.add(Duration(days: clampedIdx));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = widget.task;
+    final due = _midnight(t.due!);
+    final created = _midnight(t.createdAt);
+    final lastDay =
+        widget.windowStart.add(Duration(days: widget.totalDays - 1));
+
+    // Stored start (or createdAt fallback). Drag overrides this until release.
+    final storedStart = t.plannedStart != null ? _midnight(t.plannedStart!) : (
+        created.isAfter(widget.today) ? widget.today : created);
+    final liveStart = _liveStartPx == null ? storedStart : _snappedLiveStart;
+
+    final clippedStart =
+        liveStart.isBefore(widget.windowStart) ? widget.windowStart : liveStart;
+    final clippedEnd = due.isAfter(lastDay) ? lastDay : due;
+
+    final emptyRow = Container(
+      height: widget.rowHeight,
+      decoration: BoxDecoration(
+        border: Border(
+          bottom:
+              BorderSide(color: AppPalette.glassStroke.withValues(alpha: 0.5)),
+        ),
+      ),
+    );
+
+    if (clippedEnd.isBefore(clippedStart) ||
+        clippedEnd.isBefore(widget.windowStart) ||
+        clippedStart.isAfter(lastDay)) {
+      return emptyRow;
+    }
+
+    final startIdx = clippedStart.difference(widget.windowStart).inDays;
+    final endIdx = clippedEnd.difference(widget.windowStart).inDays;
+    final left = startIdx * widget.dayWidth;
+    final width = (endIdx - startIdx + 1) * widget.dayWidth;
+    final overdue = due.isBefore(widget.today);
+    final clippedLeft = liveStart.isBefore(widget.windowStart);
+    final clippedRight = due.isAfter(lastDay);
+
+    final tooltipMsg = '${t.title}\n'
+        'Start ${relativeDay(liveStart)} · Due ${relativeDay(due)}'
+        '${t.plannedStart == null ? '' : ' · custom start'}';
+
+    return SizedBox(
+      height: widget.rowHeight,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(
+                      color:
+                          AppPalette.glassStroke.withValues(alpha: 0.5)),
+                ),
+              ),
+            ),
+          ),
+          // The bar body: tap to edit the task. Kept narrower than the
+          // resize handle so dragging the leftmost few pixels always
+          // resizes instead of triggering tap.
+          Positioned(
+            left: left + 8,
+            top: 6,
+            width: (width - 10).clamp(4.0, double.infinity),
+            height: widget.rowHeight - 12,
+            child: Tooltip(
+              message: tooltipMsg,
+              child: GestureDetector(
+                onTap: widget.onTap,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: widget.color.withValues(alpha: 0.32),
+                    border: Border.all(
+                      color: overdue
+                          ? AppPalette.danger.withValues(alpha: 0.85)
+                          : widget.color.withValues(alpha: 0.75),
+                      width: overdue ? 1.4 : 1,
+                    ),
+                    borderRadius: BorderRadius.horizontal(
+                      left: const Radius.circular(2),
+                      right: clippedRight
+                          ? const Radius.circular(2)
+                          : const Radius.circular(8),
+                    ),
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    t.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // Left-edge resize handle. Sibling of the bar (not a child) so
+          // pointer events here never bubble to the bar's tap handler. Only
+          // visible when the bar's start isn't already clipped against the
+          // window's left edge (where the handle would be invisible).
+          if (!clippedLeft)
+            Positioned(
+              left: left,
+              top: 6,
+              width: 10,
+              height: widget.rowHeight - 12,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.resizeLeftRight,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onHorizontalDragStart: (_) => setState(
+                      () => _liveStartPx = startIdx * widget.dayWidth),
+                  onHorizontalDragUpdate: (d) => setState(() {
+                    _liveStartPx = ((_liveStartPx ??
+                                startIdx * widget.dayWidth) +
+                            d.delta.dx)
+                        .clamp(0.0,
+                            (widget.totalDays - 1) * widget.dayWidth);
+                  }),
+                  onHorizontalDragEnd: (_) {
+                    if (_liveStartPx != null) {
+                      final newStart = _snappedLiveStart;
+                      // Treat "dragged back to createdAt" (or earlier) as
+                      // a request to clear the custom start.
+                      final isDefault = !newStart.isAfter(created);
+                      ref.read(tasksProvider.notifier).save(
+                            isDefault
+                                ? t.copyWith(clearPlannedStart: true)
+                                : t.copyWith(plannedStart: newStart),
+                          );
+                    }
+                    setState(() => _liveStartPx = null);
+                  },
+                  child: Center(
+                    child: Container(
+                      width: 4,
+                      decoration: BoxDecoration(
+                        color: widget.color,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Header strip: month-name band on top, then per-day number + weekday
+/// letter, with today's column highlighted by an accent pill.
+class _GanttHeaderPainter extends CustomPainter {
+  _GanttHeaderPainter({
+    required this.start,
+    required this.totalDays,
+    required this.dayWidth,
+    required this.today,
+  });
+
+  final DateTime start;
+  final int totalDays;
+  final double dayWidth;
+  final DateTime today;
+
+  static const _months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  static const _dows = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const monthStyle = TextStyle(
+      color: AppPalette.lavender,
+      fontSize: 11,
+      fontWeight: FontWeight.w700,
+      letterSpacing: 0.4,
+    );
+    const dayStyle = TextStyle(
+      color: AppPalette.textPrimary,
+      fontSize: 12,
+      fontWeight: FontWeight.w600,
+    );
+    const weekendStyle = TextStyle(
+      color: AppPalette.textSecondary,
+      fontSize: 12,
+    );
+    const dowStyle = TextStyle(
+      color: AppPalette.textFaint,
+      fontSize: 9,
+      letterSpacing: 0.3,
+    );
+
+    // Month bands across the top, one label per month-in-window.
+    var i = 0;
+    while (i < totalDays) {
+      final d = start.add(Duration(days: i));
+      final nextMonth = DateTime(d.year, d.month + 1, 1);
+      final daysLeftInMonth = nextMonth.difference(d).inDays;
+      final span = (i + daysLeftInMonth > totalDays)
+          ? totalDays - i
+          : daysLeftInMonth;
+      final x = i * dayWidth;
+      final w = span * dayWidth;
+      final tp = TextPainter(
+        text: TextSpan(
+          text: '${_months[d.month - 1]} ${d.year}',
+          style: monthStyle,
+        ),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+        ellipsis: '…',
+      )..layout(maxWidth: w - 8);
+      tp.paint(canvas, Offset(x + 6, 6));
+      i += span;
+    }
+
+    // Per-day cells: highlight today, then draw day number + weekday letter.
+    for (var k = 0; k < totalDays; k++) {
+      final d = start.add(Duration(days: k));
+      final x = k * dayWidth;
+      final isWeekend =
+          d.weekday == DateTime.saturday || d.weekday == DateTime.sunday;
+      final isToday = d == today;
+
+      if (isToday) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            Rect.fromLTWH(x + 2, size.height - 32, dayWidth - 4, 28),
+            const Radius.circular(8),
+          ),
+          Paint()..color = AppPalette.accent.withValues(alpha: 0.28),
+        );
+      }
+
+      final dayTp = TextPainter(
+        text: TextSpan(
+          text: '${d.day}',
+          style: isWeekend ? weekendStyle : dayStyle,
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: dayWidth);
+      dayTp.paint(
+        canvas,
+        Offset(x + (dayWidth - dayTp.width) / 2, size.height - 28),
+      );
+
+      final dowTp = TextPainter(
+        text: TextSpan(text: _dows[d.weekday % 7], style: dowStyle),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: dayWidth);
+      dowTp.paint(
+        canvas,
+        Offset(x + (dayWidth - dowTp.width) / 2, size.height - 12),
+      );
+    }
+
+    // Hairline under the whole header so it reads as a separator.
+    canvas.drawLine(
+      Offset(0, size.height - 0.5),
+      Offset(size.width, size.height - 0.5),
+      Paint()..color = AppPalette.glassStroke,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_GanttHeaderPainter old) =>
+      old.start != start ||
+      old.totalDays != totalDays ||
+      old.dayWidth != dayWidth ||
+      old.today != today;
+}
+
+/// Background painter for the bars region: weekend shading + daily vertical
+/// gridlines + a vertical accent line marking today.
+class _GanttGridPainter extends CustomPainter {
+  _GanttGridPainter({
+    required this.start,
+    required this.totalDays,
+    required this.dayWidth,
+    required this.today,
+  });
+
+  final DateTime start;
+  final int totalDays;
+  final double dayWidth;
+  final DateTime today;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final weekend = Paint()..color = Colors.white.withValues(alpha: 0.025);
+    final line = Paint()
+      ..color = Colors.white.withValues(alpha: 0.05)
+      ..strokeWidth = 0.5;
+    final todayLine = Paint()
+      ..color = AppPalette.accent.withValues(alpha: 0.6)
+      ..strokeWidth = 1.5;
+
+    for (var i = 0; i < totalDays; i++) {
+      final d = start.add(Duration(days: i));
+      final x = i * dayWidth;
+      if (d.weekday == DateTime.saturday || d.weekday == DateTime.sunday) {
+        canvas.drawRect(Rect.fromLTWH(x, 0, dayWidth, size.height), weekend);
+      }
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), line);
+      if (d == today) {
+        canvas.drawLine(
+          Offset(x + dayWidth / 2, 0),
+          Offset(x + dayWidth / 2, size.height),
+          todayLine,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_GanttGridPainter old) =>
+      old.start != start ||
+      old.totalDays != totalDays ||
+      old.dayWidth != dayWidth ||
+      old.today != today;
 }

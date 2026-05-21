@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_palette.dart';
+import '../../core/widgets/adaptive_draggable.dart';
 import '../../core/widgets/glass.dart';
 import '../../core/widgets/entry_dialogs.dart';
 import '../../core/widgets/ui_kit.dart';
@@ -13,11 +14,75 @@ import '../../state/app_state.dart';
 class GradesPage extends ConsumerWidget {
   const GradesPage({super.key});
 
+  /// One slot in the summary strip — paired with the widget it renders
+  /// so we can look up either side by key when reordering.
+  static Widget _widgetFor(String key) => switch (key) {
+        kGradesWidgetTrend => const _GradeTrendCard(),
+        kGradesWidgetCalculator => const _FinalGradeCalculator(),
+        kGradesWidgetStability => const _GradeStabilityCard(),
+        _ => const SizedBox.shrink(),
+      };
+
+  /// Short label used by the drag preview so the user sees what they're
+  /// moving (the full card is too big for a feedback widget).
+  static String _labelFor(String key) => switch (key) {
+        kGradesWidgetTrend => 'GPA by semester',
+        kGradesWidgetCalculator => 'Final grade calculator',
+        kGradesWidgetStability => 'Grade stability',
+        _ => '',
+      };
+
+  static IconData _iconFor(String key) => switch (key) {
+        kGradesWidgetTrend => Icons.trending_up_rounded,
+        kGradesWidgetCalculator => Icons.calculate_rounded,
+        kGradesWidgetStability => Icons.equalizer_rounded,
+        _ => Icons.crop_square_rounded,
+      };
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final courses = ref.watch(coursesProvider);
     final grades = ref.watch(gradesProvider);
     final overall = ref.watch(overallGradeProvider);
+    final widgetOrder = ref.watch(gradesWidgetOrderProvider);
+
+    // Stable sort: explicit order first, then alphabetical as a
+    // tiebreaker for legacy courses that haven't been touched yet.
+    final orderedCourses = [...courses]
+      ..sort((a, b) {
+        final byOrder = a.order.compareTo(b.order);
+        if (byOrder != 0) return byOrder;
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+
+    /// Move [moving] into [target]'s slot in the summary strip.
+    void reorderWidget(String moving, String target) {
+      if (moving == target) return;
+      final list = [...widgetOrder];
+      final from = list.indexOf(moving);
+      final ti = list.indexOf(target);
+      if (from < 0 || ti < 0 || from == ti) return;
+      list.removeAt(from);
+      final insertAt =
+          from < ti ? list.indexOf(target) + 1 : list.indexOf(target);
+      list.insert(insertAt, moving);
+      ref.read(gradesWidgetOrderProvider.notifier).reorder(list);
+    }
+
+    /// Move [moving] course into [target]'s slot in the course grid.
+    void reorderCourse(Course moving, Course target) {
+      if (moving.id == target.id) return;
+      final list = [...orderedCourses];
+      final from = list.indexWhere((x) => x.id == moving.id);
+      final ti = list.indexWhere((x) => x.id == target.id);
+      if (from < 0 || ti < 0 || from == ti) return;
+      list.removeAt(from);
+      final insertAt = from < ti
+          ? list.indexWhere((x) => x.id == target.id) + 1
+          : list.indexWhere((x) => x.id == target.id);
+      list.insert(insertAt, moving);
+      ref.read(coursesProvider.notifier).reorder(list);
+    }
 
     return PageBody(
       title: 'Grades',
@@ -65,14 +130,34 @@ class GradesPage extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // The chart + calculator get their own row so they aren't
-          // squeezed in among the course cards.
-          CardGrid(
-            children: [
-              const _GradeTrendCard(),
-              if (courses.isNotEmpty) const _FinalGradeCalculator(),
-            ],
-          ),
+          // The trend chart, calculator and stability tracker live on a
+          // single row regardless of width — locking them side-by-side
+          // keeps the "summary strip" recognisable across sessions, even
+          // if it means each card is a little narrower on small screens.
+          // Top-aligned so each card sizes to its own content. The
+          // cells are drag-reorderable (typed `String` so course drops
+          // can't land here and vice versa).
+          if (courses.isEmpty)
+            const _GradeTrendCard()
+          else
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (var i = 0; i < widgetOrder.length; i++) ...[
+                  if (i > 0) const SizedBox(width: 16),
+                  Expanded(
+                    child: _DraggableSummarySlot(
+                      slotKey: widgetOrder[i],
+                      label: _labelFor(widgetOrder[i]),
+                      icon: _iconFor(widgetOrder[i]),
+                      onReorder: (moving) =>
+                          reorderWidget(moving, widgetOrder[i]),
+                      child: _widgetFor(widgetOrder[i]),
+                    ),
+                  ),
+                ],
+              ],
+            ),
           const SizedBox(height: 20),
           // Courses section — mirrors the Academic history header style.
           Row(
@@ -91,13 +176,18 @@ class GradesPage extends ConsumerWidget {
           if (courses.isNotEmpty)
             CardGrid(
               children: [
-                for (final c in courses)
-                  _CourseCard(
+                for (final c in orderedCourses)
+                  _DraggableCourseCard(
+                    key: ValueKey(c.id),
                     course: c,
-                    entries: grades
-                        .where((g) => g.courseId == c.id)
-                        .toList()
-                      ..sort((a, b) => b.date.compareTo(a.date)),
+                    onReorder: (moving) => reorderCourse(moving, c),
+                    child: _CourseCard(
+                      course: c,
+                      entries: grades
+                          .where((g) => g.courseId == c.id)
+                          .toList()
+                        ..sort((a, b) => b.date.compareTo(a.date)),
+                    ),
                   ),
               ],
             )
@@ -127,6 +217,7 @@ class _CourseCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final cats = ref.watch(gradeCategoriesProvider);
     final avg = courseWeightedPercent(course, cats, entries);
+    final earnedPoints = courseEarnedPoints(course, entries);
     final inst = ref.watch(institutionsByIdProvider)[course.institutionId];
     final sem = course.semesterId == null
         ? null
@@ -135,7 +226,21 @@ class _CourseCard extends ConsumerWidget {
             .where((s) => s.id == course.semesterId)
             .firstOrNull;
     final bigText = avg == null ? '—' : '${avg.toStringAsFixed(1)}%';
-    final result = courseResult(course, inst, avg);
+    final result =
+        courseResult(course, inst, avg, earnedPoints: earnedPoints);
+    // When the institution scores in GPA points the secondary line
+    // would otherwise be the per-grade GPA value (e.g. "4.0") —
+    // duplicative once the % is already showing. Swap in the course's
+    // credit hours instead so the card surfaces something the user
+    // can't already see at a glance.
+    final hrs = course.creditHours;
+    final hrsLabel =
+        '${hrs.toStringAsFixed(hrs == hrs.roundToDouble() ? 0 : 1)} hrs';
+    final showsGpaPoints =
+        course.gradingMode == CourseGradingMode.graded &&
+            (inst?.gradeSystem ?? GradeSystem.percent) ==
+                GradeSystem.points;
+    final secondary = showsGpaPoints ? hrsLabel : result;
 
     Future<void> editCourse() async {
       final created = <Semester>[];
@@ -171,15 +276,29 @@ class _CourseCard extends ConsumerWidget {
         .where((g) =>
             g.categoryId == null || !catIds.contains(g.categoryId))
         .toList();
+    // The Uncategorized bucket implicitly carries whatever weight is
+    // left after the user's named categories. We show it (with that %)
+    // whenever there's a meaningful slice still uncovered, OR whenever
+    // there are stray items to surface — so a tiny leftover doesn't
+    // silently swallow real assignments.
+    final categoryWeightTotal =
+        courseCats.fold<double>(0, (s, c) => s + c.weightPercent);
+    final uncategorizedWeight =
+        (100 - categoryWeightTotal).clamp(0, 100);
+    final showUncategorized = uncategorizedWeight > 1 ||
+        uncategorized.isNotEmpty;
 
     // Weighted average of an iterable's graded items (same rule as the
     // course average: ungraded skipped, own extra credit baked in).
+    // Honours the course's grading style — explicit weights in percent
+    // mode, point totals in points mode.
     double? catAvg(Iterable<GradeEntry> items) {
       var w = 0.0, wp = 0.0;
       for (final g in items) {
         if (!g.isGraded) continue;
-        wp += g.effectivePercent! * g.weight;
-        w += g.weight;
+        final iw = course.weightOf(g);
+        wp += g.effectivePercent! * iw;
+        w += iw;
       }
       return w == 0 ? null : wp / w;
     }
@@ -243,9 +362,9 @@ class _CourseCard extends ConsumerWidget {
                         fontWeight: FontWeight.w800,
                         color: course.color),
                   ),
-                  if (result != bigText)
+                  if (secondary != bigText)
                     Text(
-                      result,
+                      secondary,
                       style: const TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
@@ -371,10 +490,12 @@ class _CourseCard extends ConsumerWidget {
                 '${c.weightPercent.toStringAsFixed(0)}%',
                 catAvg(entries.where((g) => g.categoryId == c.id)),
               ),
-            if (uncategorized.isNotEmpty)
+            if (courseCats.isEmpty && uncategorized.isNotEmpty)
+              summaryRow('All grades', null, catAvg(uncategorized))
+            else if (showUncategorized)
               summaryRow(
-                courseCats.isEmpty ? 'All grades' : 'Uncategorized',
-                null,
+                'Uncategorized',
+                '${uncategorizedWeight.toStringAsFixed(0)}%',
                 catAvg(uncategorized),
               ),
             const SizedBox(height: 6),
@@ -684,9 +805,9 @@ class _FinalGradeCalculatorState
     setState(() {
       _courseId = id;
       if (id != null) {
-        final cur = courseGrade(grades, id);
-        _current.text = cur == null ? '' : cur.toStringAsFixed(1);
         final course = courses.firstWhere((c) => c.id == id);
+        final cur = courseGrade(grades, course);
+        _current.text = cur == null ? '' : cur.toStringAsFixed(1);
         _target.text = course.targetGrade.toStringAsFixed(0);
       }
     });
@@ -698,12 +819,10 @@ class _FinalGradeCalculatorState
     final grades = ref.watch(gradesProvider);
     _courseId ??= courses.firstOrNull?.id;
     if (_courseId != null && _current.text.isEmpty && _target.text.isEmpty) {
-      final cur = courseGrade(grades, _courseId!);
+      final course = courses.firstWhere((c) => c.id == _courseId);
+      final cur = courseGrade(grades, course);
       _current.text = cur == null ? '' : cur.toStringAsFixed(1);
-      _target.text = courses
-          .firstWhere((c) => c.id == _courseId)
-          .targetGrade
-          .toStringAsFixed(0);
+      _target.text = course.targetGrade.toStringAsFixed(0);
     }
 
     final cur = double.tryParse(_current.text);
@@ -1273,3 +1392,438 @@ class _PastCourseRow extends ConsumerWidget {
   }
 }
 
+/// Top-of-page panel that bounds how much each active course's grade
+/// can still swing, given which assignments have been graded so far and
+/// how many total assignments each weighted category says it expects.
+///
+/// Reads `courseStability` for every live course; sorts the worst-case
+/// classes (largest possible drop) to the top so the user notices the
+/// ones that need attention first. Until the user fills in at least one
+/// `assignmentCount`, this is just an explainer card pointing them at
+/// the category dialog.
+class _GradeStabilityCard extends ConsumerWidget {
+  const _GradeStabilityCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final courses = ref.watch(coursesProvider);
+    final cats = ref.watch(gradeCategoriesProvider);
+    final grades = ref.watch(gradesProvider);
+
+    // Compute once per course so the sort and the row builder share data.
+    final rows = [
+      for (final c in courses) (c, courseStability(c, cats, grades)),
+    ];
+    // Largest possible drop first — "you could lose the most here".
+    rows.sort((a, b) {
+      final aDrop = (a.$2.current ?? 0) - (a.$2.worst ?? 0);
+      final bDrop = (b.$2.current ?? 0) - (b.$2.worst ?? 0);
+      return bDrop.compareTo(aDrop);
+    });
+
+    final anyCount = rows.any((r) => r.$2.hasAnyCount);
+
+    return GlassCard(
+      title: 'Grade stability',
+      icon: Icons.equalizer_rounded,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            anyCount
+                ? 'How much your final grade can still move based on '
+                    'what’s left to grade.'
+                : 'Add a total assignment count to any category to see '
+                    'how much each grade can still swing.',
+            style: const TextStyle(
+                fontSize: 12, color: AppPalette.textSecondary),
+          ),
+          const Divider(height: 22),
+          if (rows.isEmpty)
+            const EmptyHint('No active courses to track yet.',
+                icon: Icons.school_outlined)
+          else
+            for (final r in rows)
+              _StabilityRow(course: r.$1, stability: r.$2),
+        ],
+      ),
+    );
+  }
+}
+
+/// One course's stability snapshot — name, current %, the worst/best
+/// bounds, and a horizontal bar visualising where the current grade
+/// sits between them. A "based on current pace" hint annotates rows
+/// where some categories still don't have a known assignment count.
+class _StabilityRow extends StatelessWidget {
+  const _StabilityRow(
+      {required this.course, required this.stability});
+
+  final Course course;
+  final CourseStability stability;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = stability.current;
+    final best = stability.best;
+    final worst = stability.worst;
+    final swing = stability.swing;
+    final canMove = swing != null && swing > 0.05;
+
+    String fmt(double? v) =>
+        v == null ? '—' : '${v.toStringAsFixed(1)}%';
+
+    final couldGain = (current != null && best != null)
+        ? (best - current).clamp(0, double.infinity)
+        : null;
+    final couldLose = (current != null && worst != null)
+        ? (current - worst).clamp(0, double.infinity)
+        : null;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                    color: course.color, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(course.name,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w600)),
+              ),
+              GlassChip(label: fmt(current)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (!canMove)
+            // Swing collapsed — nothing pending can move this grade. The
+            // explanation depends on whether the user has any counts on
+            // file: with counts we genuinely know it's locked; without,
+            // every category is full and no bucket is hanging open.
+            Text(
+              stability.hasAnyCount
+                  ? 'Locked in — no remaining assignments can shift this grade.'
+                  : 'Nothing pending — all categories are accounted for.',
+              style: const TextStyle(
+                  fontSize: 11, color: AppPalette.textFaint),
+            )
+          else ...[
+            _StabilityBar(
+                current: current, worst: worst, best: best,
+                accent: course.color),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    couldLose == null
+                        ? 'Could drop to ${fmt(worst)}'
+                        : 'Could drop ${couldLose.toStringAsFixed(1)} '
+                            '→ ${fmt(worst)}',
+                    style: const TextStyle(
+                        fontSize: 12, color: AppPalette.warning),
+                  ),
+                ),
+                Text(
+                  couldGain == null
+                      ? 'Could rise to ${fmt(best)}'
+                      : 'Could rise ${couldGain.toStringAsFixed(1)} '
+                          '→ ${fmt(best)}',
+                  style: const TextStyle(
+                      fontSize: 12, color: AppPalette.success),
+                  textAlign: TextAlign.right,
+                ),
+              ],
+            ),
+            // Two distinct nudges, picked in order of severity. Both can
+            // show together since they describe different gaps.
+            if (stability.partial) ...[
+              const SizedBox(height: 4),
+              const Text(
+                'Estimate — some categories still lack a total count, '
+                'so the actual swing could be wider.',
+                style: TextStyle(
+                    fontSize: 11, color: AppPalette.textFaint),
+              ),
+            ],
+            if (!stability.hasAnyCount) ...[
+              const SizedBox(height: 4),
+              const Text(
+                'Add assignment counts to your categories for tighter '
+                'bounds.',
+                style: TextStyle(
+                    fontSize: 11, color: AppPalette.textFaint),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Horizontal bar showing the `worst..best` range with a marker for
+/// `current`. The track is faint, the swing range is tinted with the
+/// course accent so it's easy to scan for "how wide is this?", and the
+/// current-grade marker is a small vertical line plus a dot above it.
+class _StabilityBar extends StatelessWidget {
+  const _StabilityBar({
+    required this.current,
+    required this.worst,
+    required this.best,
+    required this.accent,
+  });
+
+  final double? current;
+  final double? worst;
+  final double? best;
+  final Color accent;
+
+  @override
+  Widget build(BuildContext context) {
+    if (worst == null || best == null) return const SizedBox.shrink();
+    // Normalise everything onto a 0..100 scale; cap above 100 in case
+    // a strong bonus pushed best over.
+    final maxV = best!.clamp(0, 110);
+    double frac(double v) => (v.clamp(0, 110) / maxV).clamp(0, 1);
+
+    return LayoutBuilder(
+      builder: (context, c) {
+        final w = c.maxWidth;
+        final worstX = frac(worst!) * w;
+        final bestX = frac(best!) * w;
+        // Marker is optional — a course with no graded work yet still
+        // has a meaningful swing band but no "you are here" line.
+        final currentX = current == null ? null : frac(current!) * w;
+        return SizedBox(
+          height: 14,
+          child: Stack(
+            children: [
+              // Full track.
+              Align(
+                alignment: Alignment.center,
+                child: Container(
+                  height: 6,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(3),
+                    color: AppPalette.glassFill.withValues(alpha: 0.3),
+                  ),
+                ),
+              ),
+              // Swing band.
+              Positioned(
+                left: worstX,
+                top: 4,
+                child: Container(
+                  width: (bestX - worstX).clamp(2, double.infinity),
+                  height: 6,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(3),
+                    color: accent.withValues(alpha: 0.55),
+                  ),
+                ),
+              ),
+              // Current-grade marker.
+              if (currentX != null)
+                Positioned(
+                  left: (currentX - 1).clamp(0, w - 2),
+                  top: 0,
+                  child: Container(
+                    width: 2,
+                    height: 14,
+                    color: Colors.white.withValues(alpha: 0.9),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Drag-source + drop-target wrapper around one card in the Grades-page
+/// summary strip. Drag data is a `String` slot key (e.g. "trend") so
+/// dropping a course tile here is type-mismatched and silently rejected
+/// by Flutter — the two reorderable spaces stay independent without a
+/// runtime check.
+class _DraggableSummarySlot extends StatelessWidget {
+  const _DraggableSummarySlot({
+    required this.slotKey,
+    required this.label,
+    required this.icon,
+    required this.onReorder,
+    required this.child,
+  });
+
+  final String slotKey;
+  final String label;
+  final IconData icon;
+  final ValueChanged<String> onReorder;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return DragTarget<String>(
+      onWillAcceptWithDetails: (d) => d.data != slotKey,
+      onAcceptWithDetails: (d) => onReorder(d.data),
+      builder: (context, candidate, _) {
+        final hovering = candidate.isNotEmpty;
+        return AdaptiveDraggable<String>(
+          data: slotKey,
+          feedback: Material(
+            color: Colors.transparent,
+            child: Opacity(
+              opacity: 0.95,
+              child: SizedBox(
+                width: 260,
+                child: _SummaryDragPreview(label: label, icon: icon),
+              ),
+            ),
+          ),
+          childWhenDragging: Opacity(opacity: 0.3, child: child),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(
+                color: hovering
+                    ? AppPalette.accent.withValues(alpha: 0.55)
+                    : Colors.transparent,
+                width: 1.5,
+              ),
+            ),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Compact glass pill rendered while a summary-strip card is being
+/// dragged — the full card would dwarf the cursor.
+class _SummaryDragPreview extends StatelessWidget {
+  const _SummaryDragPreview(
+      {required this.label, required this.icon});
+
+  final String label;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassContainer(
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: AppPalette.lavender),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w700)),
+          ),
+          const Icon(Icons.drag_indicator_rounded,
+              size: 18, color: AppPalette.textFaint),
+        ],
+      ),
+    );
+  }
+}
+
+/// Drag-source + drop-target wrapper around one course tile in the
+/// Grades-page course grid. Drag data is a `Course` so summary-strip
+/// drops (typed `String`) can't land here, and vice versa — keeping
+/// the two reorderable spaces from crossing.
+class _DraggableCourseCard extends StatelessWidget {
+  const _DraggableCourseCard({
+    super.key,
+    required this.course,
+    required this.onReorder,
+    required this.child,
+  });
+
+  final Course course;
+  final ValueChanged<Course> onReorder;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return DragTarget<Course>(
+      onWillAcceptWithDetails: (d) => d.data.id != course.id,
+      onAcceptWithDetails: (d) => onReorder(d.data),
+      builder: (context, candidate, _) {
+        final hovering = candidate.isNotEmpty;
+        return AdaptiveDraggable<Course>(
+          data: course,
+          feedback: Material(
+            color: Colors.transparent,
+            child: Opacity(
+              opacity: 0.95,
+              child: SizedBox(
+                width: 280,
+                child: _CourseDragPreview(course: course),
+              ),
+            ),
+          ),
+          childWhenDragging: Opacity(opacity: 0.3, child: child),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(
+                color: hovering
+                    ? AppPalette.accent.withValues(alpha: 0.55)
+                    : Colors.transparent,
+                width: 1.5,
+              ),
+            ),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Compact preview rendered while a course tile is being dragged.
+class _CourseDragPreview extends StatelessWidget {
+  const _CourseDragPreview({required this.course});
+
+  final Course course;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassContainer(
+      child: Row(
+        children: [
+          Container(
+            width: 16,
+            height: 16,
+            decoration: BoxDecoration(
+                color: course.color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              course.name.trim().isEmpty ? 'Course' : course.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+          const Icon(Icons.drag_indicator_rounded,
+              size: 18, color: AppPalette.textFaint),
+        ],
+      ),
+    );
+  }
+}

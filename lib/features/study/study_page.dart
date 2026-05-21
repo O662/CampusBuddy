@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_palette.dart';
+import '../../core/widgets/adaptive_draggable.dart';
 import '../../core/widgets/glass.dart';
 import '../../core/widgets/entry_dialogs.dart';
 import '../../core/widgets/markdown_lite.dart';
@@ -119,11 +120,41 @@ class _StudyPageState extends ConsumerState<StudyPage> {
     await ref.read(deckGroupsProvider.notifier).remove(g.id);
   }
 
+  /// Reassigns [deck] to [targetGroupId] (null → Ungrouped). Used by both
+  /// the grid section drop-targets and the list-view sidebar rows, so the
+  /// "drag a deck into another group" gesture has one persistence path.
+  Future<void> _moveDeckToGroup(Deck deck, String? targetGroupId) async {
+    if (deck.groupId == targetGroupId) return;
+    final updated = deck.copyWith(
+      groupId: targetGroupId,
+      clearGroup: targetGroupId == null,
+    );
+    await ref.read(decksProvider.notifier).upsert(updated);
+  }
+
+  /// Persist a new group sequence after a sidebar drag. Pulled out so
+  /// the row callback stays a one-liner.
+  Future<void> _reorderGroup(DeckGroup moving, DeckGroup target,
+      List<DeckGroup> ordered) async {
+    if (moving.id == target.id) return;
+    final list = [...ordered];
+    final from = list.indexWhere((x) => x.id == moving.id);
+    final targetIndex = list.indexWhere((x) => x.id == target.id);
+    if (from < 0 || targetIndex < 0 || from == targetIndex) return;
+    list.removeAt(from);
+    final insertAt = from < targetIndex
+        ? list.indexWhere((x) => x.id == target.id) + 1
+        : list.indexWhere((x) => x.id == target.id);
+    list.insert(insertAt, moving);
+    await ref.read(deckGroupsProvider.notifier).reorder(list);
+  }
+
   @override
   Widget build(BuildContext context) {
     final decks = ref.watch(decksProvider);
     final cards = ref.watch(cardsProvider);
     final groups = ref.watch(deckGroupsProvider);
+    final viewMode = ref.watch(studyViewModeProvider);
 
     if (_openDeckId != null) {
       final deck = decks.where((d) => d.id == _openDeckId).firstOrNull;
@@ -192,10 +223,41 @@ class _StudyPageState extends ConsumerState<StudyPage> {
       }
     }
 
+    // Callbacks both views need — defined once so grid and list stay in
+    // sync if the wiring changes (e.g. a new arg gets added).
+    void openDeck(String id) => setState(() => _openDeckId = id);
+    void studyDeck(String id) => setState(() {
+          _openDeckId = id;
+          _sessionMode = StudySessionMode.flip;
+          _studying = true;
+        });
+    Future<void> editDeck(Deck d) async {
+      final e =
+          await showDeckDialog(context, existing: d, groups: groups);
+      if (e != null) ref.read(decksProvider.notifier).upsert(e);
+    }
+
+    Future<void> addToGroup(String? groupId) async {
+      final d = await showDeckDialog(context,
+          groups: groups, presetGroupId: groupId);
+      if (d != null) ref.read(decksProvider.notifier).upsert(d);
+    }
+
+    Future<void> editGroup(DeckGroup g) async {
+      final e = await showDeckGroupDialog(context, existing: g);
+      if (e != null) ref.read(deckGroupsProvider.notifier).upsert(e);
+    }
+
     return PageBody(
       title: 'Study',
       subtitle: 'Build decks and review with spaced repetition.',
       actions: [
+        _StudyViewToggle(
+          mode: viewMode,
+          onChanged: (m) =>
+              ref.read(studyViewModeProvider.notifier).set(m),
+        ),
+        const SizedBox(width: 10),
         SoftButton(
           label: 'New group',
           icon: Icons.create_new_folder_outlined,
@@ -231,38 +293,34 @@ class _StudyPageState extends ConsumerState<StudyPage> {
                   'No decks yet. Create your first deck to start studying.',
                   icon: Icons.style_outlined),
             )
-          : _GroupedDeckLayout(
-              groups: groups,
-              decks: decks,
-              cards: cards,
-              onOpenDeck: (id) => setState(() => _openDeckId = id),
-              onStudyDeck: (id) => setState(() {
-                _openDeckId = id;
-                _sessionMode = StudySessionMode.flip;
-                _studying = true;
-              }),
-              onEditDeck: (d) async {
-                final e = await showDeckDialog(context,
-                    existing: d, groups: groups);
-                if (e != null) ref.read(decksProvider.notifier).upsert(e);
-              },
-              onDeleteDeck: _deleteDeck,
-              onAddDeckToGroup: (groupId) async {
-                final d = await showDeckDialog(context,
-                    groups: groups, presetGroupId: groupId);
-                if (d != null) {
-                  ref.read(decksProvider.notifier).upsert(d);
-                }
-              },
-              onEditGroup: (g) async {
-                final e =
-                    await showDeckGroupDialog(context, existing: g);
-                if (e != null) {
-                  ref.read(deckGroupsProvider.notifier).upsert(e);
-                }
-              },
-              onDeleteGroup: _deleteDeckGroup,
-            ),
+          : viewMode == StudyViewMode.list
+              ? _StudyListView(
+                  groups: groups,
+                  decks: decks,
+                  cards: cards,
+                  onOpenDeck: openDeck,
+                  onStudyDeck: studyDeck,
+                  onEditDeck: editDeck,
+                  onDeleteDeck: _deleteDeck,
+                  onAddDeckToGroup: addToGroup,
+                  onEditGroup: editGroup,
+                  onDeleteGroup: _deleteDeckGroup,
+                  onMoveDeck: _moveDeckToGroup,
+                  onReorderGroup: _reorderGroup,
+                )
+              : _GroupedDeckLayout(
+                  groups: groups,
+                  decks: decks,
+                  cards: cards,
+                  onOpenDeck: openDeck,
+                  onStudyDeck: studyDeck,
+                  onEditDeck: editDeck,
+                  onDeleteDeck: _deleteDeck,
+                  onAddDeckToGroup: addToGroup,
+                  onEditGroup: editGroup,
+                  onDeleteGroup: _deleteDeckGroup,
+                  onMoveDeck: _moveDeckToGroup,
+                ),
     );
   }
 }
@@ -283,6 +341,7 @@ class _GroupedDeckLayout extends StatelessWidget {
     required this.onAddDeckToGroup,
     required this.onEditGroup,
     required this.onDeleteGroup,
+    required this.onMoveDeck,
   });
 
   final List<DeckGroup> groups;
@@ -295,6 +354,10 @@ class _GroupedDeckLayout extends StatelessWidget {
   final ValueChanged<String?> onAddDeckToGroup;
   final ValueChanged<DeckGroup> onEditGroup;
   final ValueChanged<DeckGroup> onDeleteGroup;
+
+  /// `(deck, targetGroupId)` — second arg is null for Ungrouped. Called
+  /// when a tile is dropped onto a different section.
+  final Future<void> Function(Deck deck, String? targetGroupId) onMoveDeck;
 
   @override
   Widget build(BuildContext context) {
@@ -317,7 +380,7 @@ class _GroupedDeckLayout extends StatelessWidget {
       byGroup[key]!.add(d);
     }
 
-    Widget tile(Deck d) => _DeckTile(
+    Widget tile(Deck d) => _DraggableDeckTile(
           deck: d,
           total: cards.where((c) => c.deckId == d.id).length,
           due: cards.where((c) => c.deckId == d.id && c.isDue).length,
@@ -327,31 +390,76 @@ class _GroupedDeckLayout extends StatelessWidget {
           onDelete: () => onDeleteDeck(d),
         );
 
+    Widget dropSection({
+      required String? targetGroupId,
+      required Widget section,
+    }) {
+      return DragTarget<Deck>(
+        // Reject same-group drops so the hover state doesn't light up on a
+        // no-op (and so `onMoveDeck` isn't called pointlessly).
+        onWillAcceptWithDetails: (d) => d.data.groupId != targetGroupId,
+        onAcceptWithDetails: (d) => onMoveDeck(d.data, targetGroupId),
+        builder: (context, candidate, rejected) {
+          final hovering = candidate.isNotEmpty;
+          return AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(20),
+              color: hovering
+                  ? AppPalette.accent.withValues(alpha: 0.10)
+                  : Colors.transparent,
+              border: Border.all(
+                color: hovering
+                    ? AppPalette.accent.withValues(alpha: 0.55)
+                    : Colors.transparent,
+                width: 1.5,
+              ),
+            ),
+            child: section,
+          );
+        },
+      );
+    }
+
     final sections = <Widget>[];
     for (final g in orderedGroups) {
       final list = byGroup[g.id]!;
-      sections.add(_DeckSection(
-        title: g.name,
-        accentColor: g.color,
-        count: list.length,
-        onAdd: () => onAddDeckToGroup(g.id),
-        onEdit: () => onEditGroup(g),
-        onDelete: () => onDeleteGroup(g),
-        child: list.isEmpty
-            ? const EmptyHint('No decks in this group yet.',
-                icon: Icons.style_outlined)
-            : CardGrid(children: [for (final d in list) tile(d)]),
+      sections.add(dropSection(
+        targetGroupId: g.id,
+        section: _DeckSection(
+          title: g.name,
+          accentColor: g.color,
+          count: list.length,
+          onAdd: () => onAddDeckToGroup(g.id),
+          onEdit: () => onEditGroup(g),
+          onDelete: () => onDeleteGroup(g),
+          child: list.isEmpty
+              ? const EmptyHint(
+                  'No decks here yet — drag one in or use “+”.',
+                  icon: Icons.style_outlined)
+              : CardGrid(children: [for (final d in list) tile(d)]),
+        ),
       ));
     }
 
     final ungrouped = byGroup[_kUngroupedKey]!;
-    if (ungrouped.isNotEmpty) {
-      sections.add(_DeckSection(
-        title: 'Ungrouped',
-        accentColor: AppPalette.textFaint,
-        count: ungrouped.length,
-        onAdd: () => onAddDeckToGroup(null),
-        child: CardGrid(children: [for (final d in ungrouped) tile(d)]),
+    // Always render the Ungrouped section when at least one real group
+    // exists — even when empty — so the user has somewhere to drop decks
+    // back to "no group" without opening the edit dialog.
+    if (ungrouped.isNotEmpty || orderedGroups.isNotEmpty) {
+      sections.add(dropSection(
+        targetGroupId: null,
+        section: _DeckSection(
+          title: 'Ungrouped',
+          accentColor: AppPalette.textFaint,
+          count: ungrouped.length,
+          onAdd: () => onAddDeckToGroup(null),
+          child: ungrouped.isEmpty
+              ? const EmptyHint('Drop decks here to un-group them.',
+                  icon: Icons.inbox_outlined)
+              : CardGrid(children: [for (final d in ungrouped) tile(d)]),
+        ),
       ));
     }
 
@@ -1419,6 +1527,694 @@ class _TypingFace extends StatelessWidget {
                 ),
             ],
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Wraps a [_DeckTile] in an [AdaptiveDraggable] so the user can pick it
+/// up with the mouse (or long-press on touch) and drop it into another
+/// group's drop zone. Tap-throughs to the tile's buttons still work —
+/// the gesture only engages on actual movement (see [AdaptiveDraggable]).
+class _DraggableDeckTile extends StatelessWidget {
+  const _DraggableDeckTile({
+    required this.deck,
+    required this.total,
+    required this.due,
+    required this.onOpen,
+    required this.onStudy,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  final Deck deck;
+  final int total;
+  final int due;
+  final VoidCallback onOpen;
+  final VoidCallback onStudy;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final tile = _DeckTile(
+      deck: deck,
+      total: total,
+      due: due,
+      onOpen: onOpen,
+      onStudy: onStudy,
+      onEdit: onEdit,
+      onDelete: onDelete,
+    );
+    return AdaptiveDraggable<Deck>(
+      data: deck,
+      feedback: Material(
+        color: Colors.transparent,
+        child: Opacity(
+          opacity: 0.95,
+          child: SizedBox(
+            width: 280,
+            child: _DeckDragPreview(deck: deck),
+          ),
+        ),
+      ),
+      childWhenDragging: Opacity(opacity: 0.3, child: tile),
+      child: tile,
+    );
+  }
+}
+
+/// Compact stand-in shown while a deck tile is being dragged. Mirrors
+/// the folder drag preview in the To-do page so the gesture feels the
+/// same across the app.
+class _DeckDragPreview extends StatelessWidget {
+  const _DeckDragPreview({required this.deck});
+
+  final Deck deck;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassContainer(
+      child: Row(
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: deck.color.withValues(alpha: 0.25),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(Icons.style_rounded,
+                color: deck.color, size: 16),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              deck.name.trim().isEmpty ? 'Deck' : deck.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+          const Icon(Icons.drag_indicator_rounded,
+              size: 18, color: AppPalette.textFaint),
+        ],
+      ),
+    );
+  }
+}
+
+/// Segmented [Grid | List] selector that mirrors the To-do page's mode
+/// toggle so the two pages feel consistent.
+class _StudyViewToggle extends StatelessWidget {
+  const _StudyViewToggle({required this.mode, required this.onChanged});
+
+  final StudyViewMode mode;
+  final ValueChanged<StudyViewMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget seg(String label, StudyViewMode m, IconData icon) {
+      final selected = mode == m;
+      return GestureDetector(
+        onTap: () => onChanged(m),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: selected ? AppPalette.accent : Colors.transparent,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon,
+                  size: 15,
+                  color: selected
+                      ? const Color(0xFF15132B)
+                      : AppPalette.textSecondary),
+              const SizedBox(width: 6),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w700,
+                      color: selected
+                          ? const Color(0xFF15132B)
+                          : AppPalette.textSecondary)),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: AppPalette.glassStroke),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          seg('Grid', StudyViewMode.grid, Icons.view_module_outlined),
+          seg('List', StudyViewMode.list, Icons.view_list_outlined),
+        ],
+      ),
+    );
+  }
+}
+
+/// Two-pane list view for the Study page: a group sidebar on the left
+/// and the selected group's decks on the right. Mirrors the To-do
+/// list view so the page feels consistent. Falls back to a stacked
+/// layout on narrow widths so neither pane gets squeezed too thin.
+class _StudyListView extends StatefulWidget {
+  const _StudyListView({
+    required this.groups,
+    required this.decks,
+    required this.cards,
+    required this.onOpenDeck,
+    required this.onStudyDeck,
+    required this.onEditDeck,
+    required this.onDeleteDeck,
+    required this.onAddDeckToGroup,
+    required this.onEditGroup,
+    required this.onDeleteGroup,
+    required this.onMoveDeck,
+    required this.onReorderGroup,
+  });
+
+  final List<DeckGroup> groups;
+  final List<Deck> decks;
+  final List<Flashcard> cards;
+  final ValueChanged<String> onOpenDeck;
+  final ValueChanged<String> onStudyDeck;
+  final ValueChanged<Deck> onEditDeck;
+  final ValueChanged<Deck> onDeleteDeck;
+  final ValueChanged<String?> onAddDeckToGroup;
+  final ValueChanged<DeckGroup> onEditGroup;
+  final ValueChanged<DeckGroup> onDeleteGroup;
+  final Future<void> Function(Deck deck, String? targetGroupId) onMoveDeck;
+  final Future<void> Function(
+      DeckGroup moving, DeckGroup target, List<DeckGroup> ordered) onReorderGroup;
+
+  @override
+  State<_StudyListView> createState() => _StudyListViewState();
+}
+
+class _StudyListViewState extends State<_StudyListView> {
+  /// Currently-selected sidebar row. Null on first build → resolved to a
+  /// sensible default (first group, or Ungrouped) in `build`.
+  String? _selectedKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final orderedGroups = [...widget.groups]
+      ..sort((a, b) {
+        final byOrder = a.order.compareTo(b.order);
+        if (byOrder != 0) return byOrder;
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+    final knownIds = {for (final g in orderedGroups) g.id};
+
+    final byGroup = <String, List<Deck>>{
+      for (final g in orderedGroups) g.id: [],
+      _kUngroupedKey: [],
+    };
+    for (final d in widget.decks) {
+      final key = (d.groupId != null && knownIds.contains(d.groupId))
+          ? d.groupId!
+          : _kUngroupedKey;
+      byGroup[key]!.add(d);
+    }
+    final ungroupedCount = byGroup[_kUngroupedKey]!.length;
+
+    String? resolveSelection() {
+      String? fallback() {
+        if (orderedGroups.isNotEmpty) return orderedGroups.first.id;
+        if (ungroupedCount > 0) return _kUngroupedKey;
+        return null;
+      }
+
+      final key = _selectedKey;
+      if (key == null) return fallback();
+      if (key == _kUngroupedKey) {
+        return ungroupedCount > 0 ? _kUngroupedKey : fallback();
+      }
+      if (orderedGroups.any((g) => g.id == key)) return key;
+      return fallback();
+    }
+
+    final selection = resolveSelection();
+
+    Widget deckTile(Deck d) => _DraggableDeckTile(
+          deck: d,
+          total: widget.cards.where((c) => c.deckId == d.id).length,
+          due: widget.cards
+              .where((c) => c.deckId == d.id && c.isDue)
+              .length,
+          onOpen: () => widget.onOpenDeck(d.id),
+          onStudy: () => widget.onStudyDeck(d.id),
+          onEdit: () => widget.onEditDeck(d),
+          onDelete: () => widget.onDeleteDeck(d),
+        );
+
+    Widget detail() {
+      if (selection == null) {
+        return GlassContainer(
+          child: const EmptyHint(
+              'Pick a group on the left, or create one to get started.',
+              icon: Icons.folder_open_rounded),
+        );
+      }
+      final isUngrouped = selection == _kUngroupedKey;
+      final group = isUngrouped
+          ? null
+          : orderedGroups.firstWhere((g) => g.id == selection);
+      final decksHere = byGroup[selection]!;
+      final accent = isUngrouped ? AppPalette.textFaint : group!.color;
+      final title = isUngrouped ? 'Ungrouped' : group!.name;
+
+      return GlassContainer(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                      color: accent, shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(title,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w700)),
+                ),
+                GlassChip(label: '${decksHere.length}'),
+                IconButton(
+                  icon: const Icon(Icons.add_rounded, size: 20),
+                  color: AppPalette.lavender,
+                  tooltip: 'Add deck here',
+                  onPressed: () => widget
+                      .onAddDeckToGroup(isUngrouped ? null : group!.id),
+                ),
+                if (!isUngrouped)
+                  PopupMenuButton<String>(
+                    icon: const Icon(Icons.more_vert,
+                        size: 18, color: AppPalette.textSecondary),
+                    color: const Color(0xFF241F45),
+                    tooltip: 'Group options',
+                    onSelected: (v) {
+                      if (v == 'edit') widget.onEditGroup(group!);
+                      if (v == 'delete') widget.onDeleteGroup(group!);
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(
+                        value: 'edit',
+                        child: ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(Icons.edit_outlined, size: 20),
+                          title: Text('Edit group'),
+                        ),
+                      ),
+                      PopupMenuItem(
+                        value: 'delete',
+                        child: ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(Icons.delete_outline,
+                              size: 20, color: AppPalette.danger),
+                          title: Text('Delete group'),
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+            const Divider(height: 22),
+            if (decksHere.isEmpty)
+              const EmptyHint('Nothing here yet. Drag a deck in or use “+”.',
+                  icon: Icons.style_outlined)
+            else
+              CardGrid(children: [for (final d in decksHere) deckTile(d)]),
+          ],
+        ),
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, c) {
+        final pane = _GroupListPane(
+          groups: orderedGroups,
+          counts: {for (final g in orderedGroups) g.id: byGroup[g.id]!.length},
+          ungroupedCount: ungroupedCount,
+          selectedKey: selection,
+          onSelect: (key) => setState(() => _selectedKey = key),
+          onReorderGroup: (moving, target) =>
+              widget.onReorderGroup(moving, target, orderedGroups),
+          onAcceptDeck: widget.onMoveDeck,
+        );
+
+        // Below ~700px the side-by-side layout starts squeezing the right
+        // pane; stack instead so each surface keeps a usable width.
+        if (c.maxWidth < 700) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              pane,
+              const SizedBox(height: 16),
+              detail(),
+            ],
+          );
+        }
+
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(width: 260, child: pane),
+            const SizedBox(width: 16),
+            Expanded(child: detail()),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// Sidebar listing every group + an "Ungrouped" row at the bottom.
+/// Each row doubles as a drag-source (for reordering groups) and a
+/// drop-target (for moving a deck into that group). Ungrouped is
+/// drop-only — it isn't a real group so it can't be reordered.
+class _GroupListPane extends StatelessWidget {
+  const _GroupListPane({
+    required this.groups,
+    required this.counts,
+    required this.ungroupedCount,
+    required this.selectedKey,
+    required this.onSelect,
+    required this.onReorderGroup,
+    required this.onAcceptDeck,
+  });
+
+  final List<DeckGroup> groups;
+  final Map<String, int> counts;
+  final int ungroupedCount;
+  final String? selectedKey;
+  final ValueChanged<String> onSelect;
+  final void Function(DeckGroup moving, DeckGroup target) onReorderGroup;
+  final Future<void> Function(Deck deck, String? targetGroupId) onAcceptDeck;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasAnyRow = groups.isNotEmpty || ungroupedCount > 0;
+    return GlassContainer(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(bottom: 6, left: 2),
+            child: Text(
+              'Groups',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.6,
+                color: AppPalette.textSecondary,
+              ),
+            ),
+          ),
+          if (!hasAnyRow)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 12),
+              child: EmptyHint(
+                'No groups yet.\nTap “New group” to make one.',
+                icon: Icons.create_new_folder_outlined,
+              ),
+            )
+          else ...[
+            for (final g in groups)
+              _GroupListRow(
+                key: ValueKey(g.id),
+                group: g,
+                count: counts[g.id] ?? 0,
+                selected: selectedKey == g.id,
+                onTap: () => onSelect(g.id),
+                onReorderTarget: (moving) => onReorderGroup(moving, g),
+                onAcceptDeck: (deck) => onAcceptDeck(deck, g.id),
+              ),
+            // Ungrouped is always shown when there are real groups, so the
+            // user has somewhere to drop decks back to "no group".
+            if (groups.isNotEmpty || ungroupedCount > 0) ...[
+              if (groups.isNotEmpty) const Divider(height: 14),
+              _UngroupedListRow(
+                count: ungroupedCount,
+                selected: selectedKey == _kUngroupedKey,
+                onTap: () => onSelect(_kUngroupedKey),
+                onAcceptDeck: (deck) => onAcceptDeck(deck, null),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// One group row in the sidebar — draggable to reorder, droppable to
+/// accept a deck from elsewhere. Mirrors `_FolderListRow` in todo_page.
+class _GroupListRow extends StatelessWidget {
+  const _GroupListRow({
+    super.key,
+    required this.group,
+    required this.count,
+    required this.selected,
+    required this.onTap,
+    required this.onReorderTarget,
+    required this.onAcceptDeck,
+  });
+
+  final DeckGroup group;
+  final int count;
+  final bool selected;
+  final VoidCallback onTap;
+  final ValueChanged<DeckGroup> onReorderTarget;
+  final Future<void> Function(Deck deck) onAcceptDeck;
+
+  @override
+  Widget build(BuildContext context) {
+    // Outer DragTarget accepts decks (drop → move into this group).
+    return DragTarget<Deck>(
+      onWillAcceptWithDetails: (d) => d.data.groupId != group.id,
+      onAcceptWithDetails: (d) => onAcceptDeck(d.data),
+      builder: (context, deckCandidate, _) {
+        final deckHovering = deckCandidate.isNotEmpty;
+        // Inner DragTarget + Draggable for group reordering.
+        return DragTarget<DeckGroup>(
+          onWillAcceptWithDetails: (d) => d.data.id != group.id,
+          onAcceptWithDetails: (d) => onReorderTarget(d.data),
+          builder: (context, groupCandidate, _) {
+            final groupHovering = groupCandidate.isNotEmpty;
+            return AdaptiveDraggable<DeckGroup>(
+              data: group,
+              feedback: Material(
+                color: Colors.transparent,
+                child: Opacity(
+                  opacity: 0.95,
+                  child: SizedBox(
+                    width: 260,
+                    child: _DeckGroupDragPreview(group: group),
+                  ),
+                ),
+              ),
+              childWhenDragging: Opacity(
+                opacity: 0.3,
+                child: _rowChild(
+                    hovering: false, deckHovering: false),
+              ),
+              child: _rowChild(
+                hovering: groupHovering,
+                deckHovering: deckHovering,
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _rowChild({
+    required bool hovering,
+    required bool deckHovering,
+  }) {
+    final base = selected
+        ? AppPalette.accent.withValues(alpha: 0.18)
+        : (hovering
+            ? AppPalette.accent.withValues(alpha: 0.10)
+            : Colors.transparent);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding:
+              const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            color: base,
+            // A separate, stronger highlight for a hovering deck makes
+            // the "drop here to move" affordance unmistakeable.
+            border: deckHovering
+                ? Border.all(
+                    color: AppPalette.accent.withValues(alpha: 0.55),
+                    width: 1.5)
+                : null,
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                    color: group.color, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  group.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight:
+                        selected ? FontWeight.w700 : FontWeight.w600,
+                    color: selected
+                        ? AppPalette.textPrimary
+                        : AppPalette.textSecondary,
+                  ),
+                ),
+              ),
+              GlassChip(label: '$count'),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Catch-all "Ungrouped" sidebar row. Drop-only (it isn't a real group
+/// so it can't be reordered or edited).
+class _UngroupedListRow extends StatelessWidget {
+  const _UngroupedListRow({
+    required this.count,
+    required this.selected,
+    required this.onTap,
+    required this.onAcceptDeck,
+  });
+
+  final int count;
+  final bool selected;
+  final VoidCallback onTap;
+  final Future<void> Function(Deck deck) onAcceptDeck;
+
+  @override
+  Widget build(BuildContext context) {
+    return DragTarget<Deck>(
+      onWillAcceptWithDetails: (d) => d.data.groupId != null,
+      onAcceptWithDetails: (d) => onAcceptDeck(d.data),
+      builder: (context, candidate, _) {
+        final hovering = candidate.isNotEmpty;
+        final base = selected
+            ? AppPalette.accent.withValues(alpha: 0.18)
+            : Colors.transparent;
+        return Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 10, vertical: 9),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                color: base,
+                border: hovering
+                    ? Border.all(
+                        color:
+                            AppPalette.accent.withValues(alpha: 0.55),
+                        width: 1.5)
+                    : null,
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: const BoxDecoration(
+                        color: AppPalette.textFaint,
+                        shape: BoxShape.circle),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Ungrouped',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight:
+                            selected ? FontWeight.w700 : FontWeight.w600,
+                        color: selected
+                            ? AppPalette.textPrimary
+                            : AppPalette.textSecondary,
+                      ),
+                    ),
+                  ),
+                  GlassChip(label: '$count'),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Compact preview rendered while a sidebar group row is being dragged
+/// to reorder. Mirrors `_FolderDragPreview` in the To-do page.
+class _DeckGroupDragPreview extends StatelessWidget {
+  const _DeckGroupDragPreview({required this.group});
+
+  final DeckGroup group;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassContainer(
+      child: Row(
+        children: [
+          Container(
+            width: 16,
+            height: 16,
+            decoration: BoxDecoration(
+                color: group.color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              group.name.trim().isEmpty ? 'Group' : group.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+          const Icon(Icons.drag_indicator_rounded,
+              size: 18, color: AppPalette.textFaint),
         ],
       ),
     );

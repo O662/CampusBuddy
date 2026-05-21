@@ -1053,6 +1053,7 @@ Future<Course?> showCourseDialog(
   final creditsC = TextEditingController(
       text: (existing?.creditHours ?? 3).toString());
   var seed = existing?.colorSeed ?? 0;
+  var gradingStyle = existing?.gradingStyle ?? GradingStyle.percent;
   String? institutionId = existing?.institutionId ??
       (institutions.isNotEmpty ? institutions.first.id : null);
   if (institutionId != null &&
@@ -1191,6 +1192,38 @@ Future<Course?> showCourseDialog(
               const Expanded(child: SizedBox()),
             ],
           ),
+          const SizedBox(height: 12),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text('How does this class compute its grade?',
+                style: TextStyle(
+                    fontSize: 11, color: AppPalette.textSecondary)),
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final s in GradingStyle.values)
+                ChoiceChip(
+                  label: Text(s.label),
+                  selected: gradingStyle == s,
+                  selectedColor:
+                      AppPalette.accent.withValues(alpha: 0.3),
+                  onSelected: (_) =>
+                      setState(() => gradingStyle = s),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            gradingStyle == GradingStyle.points
+                ? 'Items combine by their point totals — a 1000-pt '
+                    'final outweighs a 100-pt quiz automatically.'
+                : 'Items combine by the explicit weight you set on each '
+                    'one (default 1×).',
+            style: const TextStyle(
+                fontSize: 11, color: AppPalette.textFaint),
+          ),
           const SizedBox(height: 16),
           Wrap(
             spacing: 10,
@@ -1244,6 +1277,7 @@ Future<Course?> showCourseDialog(
               semesterId: semesterId,
               creditHours:
                   (double.tryParse(creditsC.text) ?? 3).clamp(0, 30),
+              gradingStyle: gradingStyle,
             ),
           );
         },
@@ -1307,6 +1341,18 @@ Future<GradeEntry?> showGradeDialog(
         if (catRequired && categoryId == null) {
           categoryId = catsForCourse.first.id;
         }
+        // Look up the picked course so the dialog can adapt labels +
+        // hide the now-redundant Weight field for points-based classes
+        // (where the point total IS the weight).
+        final selectedCourse = courses
+            .where((c) => c.id == courseId)
+            .firstOrNull;
+        final isPoints =
+            selectedCourse?.gradingStyle == GradingStyle.points;
+        final earnedLabel =
+            isPoints ? 'Points earned' : 'Earned grade';
+        final totalLabel =
+            isPoints ? 'Total points' : 'Max grade';
 
         return Column(
           mainAxisSize: MainAxisSize.min,
@@ -1336,21 +1382,36 @@ Future<GradeEntry?> showGradeDialog(
             Row(
               children: [
                 Expanded(
-                    child: labeled('Earned grade',
+                    child: labeled(earnedLabel,
                         _field(earnedC, '',
                             keyboard: TextInputType.number))),
                 const SizedBox(width: 10),
                 Expanded(
-                    child: labeled('Max grade',
+                    child: labeled(totalLabel,
                         _field(totalC, '',
                             keyboard: TextInputType.number))),
-                const SizedBox(width: 10),
-                Expanded(
-                    child: labeled('Weight',
-                        _field(weightC, '',
-                            keyboard: TextInputType.number))),
+                // In points mode the total IS the weight — surfacing a
+                // separate Weight field would only let the user fight
+                // the math. Hidden so they can't.
+                if (!isPoints) ...[
+                  const SizedBox(width: 10),
+                  Expanded(
+                      child: labeled('Weight',
+                          _field(weightC, '',
+                              keyboard: TextInputType.number))),
+                ],
               ],
             ),
+            if (isPoints)
+              const Padding(
+                padding: EdgeInsets.only(top: 6),
+                child: Text(
+                  'This class uses points-based grading — the total '
+                  'doubles as this item’s weight in the course average.',
+                  style: TextStyle(
+                      fontSize: 11, color: AppPalette.textSecondary),
+                ),
+              ),
             if (catsForCourse.isNotEmpty) ...[
               const SizedBox(height: 12),
               labeled(
@@ -1499,6 +1560,10 @@ Future<GradeCategory?> showCategoryDialog(
   final nameC = TextEditingController(text: existing?.name ?? '');
   final weightC = TextEditingController(
       text: (existing?.weightPercent ?? 0).toStringAsFixed(0));
+  // Empty when no count is set — feeds the optional "20 homeworks total"
+  // hint used by the grade-stability tracker.
+  final countC = TextEditingController(
+      text: existing?.assignmentCount?.toString() ?? '');
 
   return showGlassDialog<GradeCategory>(
     context,
@@ -1516,6 +1581,16 @@ Future<GradeCategory?> showCategoryDialog(
           'left over covers uncategorized items.',
           style: TextStyle(fontSize: 11, color: AppPalette.textSecondary),
         ),
+        const SizedBox(height: 14),
+        _field(countC, 'Total assignments in this category (optional)',
+            keyboard: TextInputType.number),
+        const SizedBox(height: 8),
+        const Text(
+          'If the syllabus lists how many items will end up in this '
+          'category (e.g. 20 homeworks), enter it here to power the '
+          'grade-stability tracker. Leave blank if unknown.',
+          style: TextStyle(fontSize: 11, color: AppPalette.textSecondary),
+        ),
       ],
     ),
     actions: (context) => [
@@ -1525,6 +1600,10 @@ Future<GradeCategory?> showCategoryDialog(
       FilledButton(
         onPressed: () {
           if (nameC.text.trim().isEmpty) return;
+          // Treat empty / 0 / negative as "unset" so the dialog round-
+          // trips a cleared count back to null rather than zero.
+          final parsedCount = int.tryParse(countC.text.trim());
+          final hasCount = parsedCount != null && parsedCount > 0;
           final base = existing ??
               GradeCategory(id: newId(), courseId: courseId, name: '');
           Navigator.pop(
@@ -1533,6 +1612,8 @@ Future<GradeCategory?> showCategoryDialog(
               name: nameC.text.trim(),
               weightPercent:
                   (double.tryParse(weightC.text) ?? 0).clamp(0, 100),
+              assignmentCount: hasCount ? parsedCount : null,
+              clearAssignmentCount: !hasCount,
             ),
           );
         },

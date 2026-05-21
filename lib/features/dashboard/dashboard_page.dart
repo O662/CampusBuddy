@@ -29,8 +29,7 @@ class DashboardPage extends ConsumerWidget {
 
     return PageBody(
       title: '$greeting, ${profile.name} 👋',
-      subtitle: 'Here is everything on your plate today. '
-          'Drag a card to rearrange (long-press on touch).',
+      subtitle: 'Here is everything on your plate today. ',
       actions: [
         SoftButton(
           label: 'Customize',
@@ -321,7 +320,7 @@ class _GradeProgressCard extends ConsumerWidget {
                     child: _GradeBar(
                       label: c.name,
                       color: c.color,
-                      percent: courseGrade(grades, c.id),
+                      percent: courseGrade(grades, c),
                       target: c.targetGrade,
                     ),
                   ),

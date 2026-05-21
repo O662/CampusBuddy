@@ -61,6 +61,12 @@ class CourseNotifier extends CollectionNotifier<Course> {
   Map<String, dynamic> encode(Course i) => i.toJson();
   @override
   Course decode(Map j) => Course.fromJson(j);
+
+  /// Persist [ordered] as the new sequence; positions are renumbered 0..n.
+  Future<void> reorder(List<Course> ordered) => upsertAll([
+        for (var i = 0; i < ordered.length; i++)
+          ordered[i].copyWith(order: i),
+      ]);
 }
 
 class GradeNotifier extends CollectionNotifier<GradeEntry> {
@@ -178,6 +184,15 @@ class TaskNotifier extends CollectionNotifier<TaskItem> {
     if (g == null || keepGrade) return;
     await ref.read(gradesProvider.notifier).remove(_gradeId(id));
   }
+
+  /// Write the Gantt's manual ordering for [ordered] back to disk. Each task
+  /// is assigned a [TaskItem.ganttOrder] equal to its position in the list,
+  /// so subsequent reorders stay stable. Tasks not in [ordered] are left
+  /// untouched.
+  Future<void> reorderGantt(List<TaskItem> ordered) => upsertAll([
+        for (var i = 0; i < ordered.length; i++)
+          ordered[i].copyWith(ganttOrder: i + 1),
+      ]);
 
   Future<void> _syncGrade(TaskItem t) async {
     final grades = ref.read(gradesProvider.notifier);
@@ -492,6 +507,72 @@ final todoViewModeProvider =
     NotifierProvider<TodoViewModeNotifier, TodoViewMode>(
         TodoViewModeNotifier.new);
 
+/// The two layouts the Study page supports — mirrors [TodoViewMode] so
+/// the UI toggle / persistence stays in lock-step with the To-do page.
+enum StudyViewMode { grid, list }
+
+class StudyViewModeNotifier extends Notifier<StudyViewMode> {
+  @override
+  StudyViewMode build() {
+    final raw = ref.read(localStoreProvider).readStudyViewMode();
+    return raw == 'list' ? StudyViewMode.list : StudyViewMode.grid;
+  }
+
+  Future<void> set(StudyViewMode mode) async {
+    if (state == mode) return;
+    await ref.read(localStoreProvider).writeStudyViewMode(mode.name);
+    state = mode;
+  }
+}
+
+final studyViewModeProvider =
+    NotifierProvider<StudyViewModeNotifier, StudyViewMode>(
+        StudyViewModeNotifier.new);
+
+/// String keys identifying the three cards in the Grades-page summary
+/// strip. Kept as a const list (not an enum) so persistence is simple
+/// and adding/removing a card later is just a list edit.
+const kGradesWidgetTrend = 'trend';
+const kGradesWidgetCalculator = 'calculator';
+const kGradesWidgetStability = 'stability';
+const kGradesWidgetAll = [
+  kGradesWidgetTrend,
+  kGradesWidgetCalculator,
+  kGradesWidgetStability,
+];
+
+/// Persisted order for the Grades summary strip. The notifier always
+/// returns a sanitised list — every known key appears exactly once,
+/// unknown keys from older sessions are dropped, and any new keys (e.g.
+/// after a future widget is added) are appended to the end.
+class GradesWidgetOrderNotifier extends Notifier<List<String>> {
+  @override
+  List<String> build() => _sanitise(
+      ref.read(localStoreProvider).readGradesWidgetOrder());
+
+  List<String> _sanitise(List<String> raw) {
+    final result = <String>[];
+    final seen = <String>{};
+    for (final k in raw) {
+      if (kGradesWidgetAll.contains(k) && seen.add(k)) result.add(k);
+    }
+    for (final k in kGradesWidgetAll) {
+      if (seen.add(k)) result.add(k);
+    }
+    return result;
+  }
+
+  Future<void> reorder(List<String> next) async {
+    final clean = _sanitise(next);
+    await ref.read(localStoreProvider).writeGradesWidgetOrder(clean);
+    state = clean;
+  }
+}
+
+final gradesWidgetOrderProvider =
+    NotifierProvider<GradesWidgetOrderNotifier, List<String>>(
+        GradesWidgetOrderNotifier.new);
+
 /// Live snapshot driving per-second redraws of running timers plus the set
 /// of timers currently ringing.
 typedef TimerEngineState = ({DateTime now, Set<String> alarmingIds});
@@ -797,17 +878,21 @@ final foldersWithCourseProvider =
 
 /// Weighted course percentage, or null when the course has no *graded*
 /// items yet. Ungraded placeholders (e.g. assignments awaiting a score)
-/// are skipped entirely so they don't drag the average down.
-double? courseGrade(List<GradeEntry> grades, String courseId) {
+/// are skipped entirely so they don't drag the average down. The
+/// per-item weight depends on the course's [GradingStyle] — explicit
+/// weights in percent mode, point totals in points mode (via
+/// [Course.weightOf]).
+double? courseGrade(List<GradeEntry> grades, Course course) {
   final items = grades
-      .where((g) => g.courseId == courseId && g.isGraded)
+      .where((g) => g.courseId == course.id && g.isGraded)
       .toList();
   if (items.isEmpty) return null;
   var weighted = 0.0;
   var weightSum = 0.0;
   for (final g in items) {
-    weighted += g.effectivePercent! * g.weight;
-    weightSum += g.weight;
+    final w = course.weightOf(g);
+    weighted += g.effectivePercent! * w;
+    weightSum += w;
   }
   return weightSum == 0 ? null : weighted / weightSum;
 }
@@ -837,8 +922,12 @@ double? courseWeightedPercent(
   double? avgOf(Iterable<GradeEntry> items) {
     var w = 0.0, wp = 0.0;
     for (final g in items) {
-      wp += g.effectivePercent! * g.weight;
-      w += g.weight;
+      // Points-mode courses weight by total; percent-mode by the
+      // explicit weight field. Centralised on Course.weightOf so we
+      // can't drift out of sync with the rest of the calculator.
+      final iw = course.weightOf(g);
+      wp += g.effectivePercent! * iw;
+      w += iw;
     }
     return w == 0 ? null : wp / w;
   }
@@ -878,29 +967,219 @@ double? courseWeightedPercent(
   return total < 0 ? 0 : total;
 }
 
+/// What the grade-stability tracker reports for a single course.
+///
+/// - `current` — the same number `courseWeightedPercent` would return
+///   (null when there's nothing to base it on).
+/// - `best` / `worst` — bounds the course grade could still settle at,
+///   assuming every remaining assignment scores 100% / 0% respectively.
+///   Both fold in [Course.extraCreditPct] and any bonus-only EC items
+///   the same way `courseWeightedPercent` does, so the current grade
+///   always lies within `[worst, best]`.
+/// - `swing` — `best - worst`, the maximum total movement still on the
+///   table. The most actionable single number for the user.
+/// - `partial` — true when one or more weighted categories (or the
+///   uncategorized leftover) has no `assignmentCount` set AND has at
+///   least one assignment still unaccounted for. In that case the
+///   bounds reflect a best-effort estimate (no-count buckets stay at
+///   their current pace); the actual swing could be wider.
+/// - `hasAnyCount` — at least one category has an `assignmentCount`
+///   set. The grades-page card uses this to gate the prompt that
+///   tells the user "add counts to see stability".
+typedef CourseStability = ({
+  double? current,
+  double? best,
+  double? worst,
+  double? swing,
+  bool partial,
+  bool hasAnyCount,
+});
+
+/// Bound the course's final grade based on what's still pending.
+///
+/// For each weighted category with an `assignmentCount` we treat the
+/// graded share as locked in at its current average and the remaining
+/// share as a floor-or-ceiling unknown (0% / 100%). Categories without
+/// a count — and the uncategorized leftover — are assumed to continue
+/// at their current pace (so they contribute zero swing); this is a
+/// **lower bound** on the true swing, surfaced via `partial`. Bonuses
+/// flat-add to both ends the same way they do in [courseWeightedPercent].
+CourseStability courseStability(
+  Course course,
+  List<GradeCategory> categories,
+  List<GradeEntry> allEntries,
+) {
+  final courseEntries =
+      allEntries.where((g) => g.courseId == course.id).toList();
+  final graded = courseEntries.where((g) => g.isGraded).toList();
+
+  // Flat bonus added to both best and worst — same rule as the
+  // current-grade calculation.
+  var bonus = course.extraCreditPct;
+  for (final g in courseEntries) {
+    if (g.isBonusOnly) bonus += g.extraCreditValue ?? 0;
+  }
+
+  final cats =
+      categories.where((c) => c.courseId == course.id).toList();
+  final current = courseWeightedPercent(course, categories, allEntries);
+
+  if (cats.isEmpty) {
+    // No categories at all → no way to know what's pending; treat
+    // everything as "current pace" so there's no swing to report.
+    return (
+      current: current,
+      best: current,
+      worst: current,
+      swing: current == null ? null : 0,
+      partial: false,
+      hasAnyCount: false,
+    );
+  }
+
+  double? avgOf(Iterable<GradeEntry> items) {
+    var w = 0.0, wp = 0.0;
+    for (final g in items) {
+      final iw = course.weightOf(g);
+      wp += g.effectivePercent! * iw;
+      w += iw;
+    }
+    return w == 0 ? null : wp / w;
+  }
+
+  var best = 0.0;
+  var worst = 0.0;
+  var partial = false;
+  var hasAnyCount = false;
+  var weightAccounted = 0.0;
+
+  for (final c in cats) {
+    if (c.weightPercent <= 0) continue;
+    weightAccounted += c.weightPercent;
+    final catEntries =
+        graded.where((g) => g.categoryId == c.id).toList();
+    final nDone = catEntries.length;
+    final catAvg = avgOf(catEntries); // null if nothing graded yet
+
+    final N = c.assignmentCount;
+    if (N != null && N > 0) {
+      hasAnyCount = true;
+      final pending = (N - nDone).clamp(0, N);
+      if (pending == 0) {
+        // Category fully done — locked in.
+        final avg = catAvg ?? 0;
+        best += avg * c.weightPercent / 100;
+        worst += avg * c.weightPercent / 100;
+      } else {
+        // Locked share keeps the current category average; pending
+        // share floats between 0 and 100.
+        final lockedWeight = (nDone / N) * c.weightPercent;
+        final remainingWeight = (pending / N) * c.weightPercent;
+        final lockedAvg = catAvg ?? 0; // 0 only when nDone == 0
+        final lockedContribution = lockedAvg * lockedWeight / 100;
+        best += lockedContribution + remainingWeight; // remaining @ 100
+        worst += lockedContribution; // remaining @ 0
+      }
+    } else {
+      // No total specified. Honest bounds would be 0..weight, but a
+      // category with established pace usually keeps it — using the
+      // current avg keeps swing meaningful while we flag the gap via
+      // `partial`. A truly empty bucket (no avg) defaults to 0 for
+      // worst and the full weight for best so the user still sees
+      // upside.
+      if (catAvg != null) {
+        best += catAvg * c.weightPercent / 100;
+        worst += catAvg * c.weightPercent / 100;
+        if (nDone > 0) partial = true;
+      } else {
+        best += c.weightPercent;
+        worst += 0;
+      }
+    }
+  }
+
+  // Uncategorized leftover — same treatment as a no-count category.
+  final leftover = (100 - weightAccounted).clamp(0, 100);
+  if (leftover > 0) {
+    final uncatAvg = avgOf(graded.where((g) => g.categoryId == null));
+    if (uncatAvg != null) {
+      best += uncatAvg * leftover / 100;
+      worst += uncatAvg * leftover / 100;
+      partial = true;
+    } else {
+      best += leftover;
+      worst += 0;
+    }
+  }
+
+  best = (best + bonus).clamp(0, double.infinity);
+  worst = (worst + bonus).clamp(0, double.infinity);
+
+  return (
+    current: current,
+    best: best,
+    worst: worst,
+    swing: best - worst,
+    partial: partial,
+    hasAnyCount: hasAnyCount,
+  );
+}
+
+/// Total earned points across a course's graded items — what
+/// `cutoffsArePoints` mode compares against. Includes item-level extra
+/// credit when it's expressed in points (per [GradeEntry.effectivePercent]'s
+/// rule) and the course-level [Course.extraCreditPct] when it's points;
+/// percentage-style EC has no point analog and is ignored.
+double courseEarnedPoints(Course course, List<GradeEntry> allEntries) {
+  var pts = 0.0;
+  for (final g in allEntries) {
+    if (g.courseId != course.id) continue;
+    if (g.isBonusOnly) {
+      if (g.extraCreditIsPoints) pts += g.extraCreditValue ?? 0;
+      continue;
+    }
+    if (!g.isGraded) continue;
+    pts += g.earned!;
+    if (g.extraCredit && g.extraCreditIsPoints) {
+      pts += g.extraCreditValue ?? 0;
+    }
+  }
+  if (course.extraCreditIsPoints) pts += course.extraCreditPct;
+  return pts;
+}
+
 /// The course's final grade rendered per its grading mode + its
 /// institution's system (graded mode uses the course's own cutoffs).
-String courseResult(Course course, Institution? inst, double? pct) {
+/// Pass [earnedPoints] when the course has [Course.cutoffsArePoints] set
+/// so the letter/pass decision compares against raw points; without it
+/// the function falls back to the percent path.
+String courseResult(Course course, Institution? inst, double? pct,
+    {double? earnedPoints}) {
   if (pct == null) return '—';
+  final byPoints = course.cutoffsArePoints && earnedPoints != null;
+  bool pass() => byPoints
+      ? earnedPoints >= course.passCutoff
+      : pct >= course.passCutoff;
+  String letter() => byPoints
+      ? course.letterForPoints(earnedPoints)
+      : course.letterFor(pct);
   switch (course.gradingMode) {
     case CourseGradingMode.passFail:
-      return pct >= course.passCutoff ? 'Pass' : 'Fail';
+      return pass() ? 'Pass' : 'Fail';
     case CourseGradingMode.satisfactory:
-      return pct >= course.passCutoff
-          ? 'Satisfactory'
-          : 'Unsatisfactory';
+      return pass() ? 'Satisfactory' : 'Unsatisfactory';
     case CourseGradingMode.graded:
       final system = inst?.gradeSystem ?? GradeSystem.percent;
       switch (system) {
         case GradeSystem.percent:
           return '${pct.toStringAsFixed(1)}%';
         case GradeSystem.letter:
-          return course.letterFor(pct);
+          return letter();
         case GradeSystem.points:
           // Complex uses the institution's standard fractional table;
           // simple maps the course's own letter cutoffs to whole points.
           if (inst!.gpaComplex) return inst.gpaText(pct);
-          final base = switch (course.letterFor(pct)) {
+          final base = switch (letter()) {
             'A' => 4.0,
             'B' => 3.0,
             'C' => 2.0,
@@ -919,7 +1198,7 @@ final overallGradeProvider = Provider<double?>((ref) {
   final courses = ref.watch(coursesProvider);
   final perCourse = <double>[];
   for (final c in courses) {
-    final g = courseGrade(grades, c.id);
+    final g = courseGrade(grades, c);
     if (g != null) perCourse.add(g);
   }
   if (perCourse.isEmpty) return null;

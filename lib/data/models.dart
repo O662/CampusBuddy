@@ -82,6 +82,23 @@ extension CourseGradingModeX on CourseGradingMode {
       };
 }
 
+/// How items in a course combine into the course average.
+///
+/// - `percent` (default, legacy): each item contributes its `effectivePercent`
+///   weighted by its explicit `weight` field — useful when assignments are
+///   roughly equal in significance and weight is set per-item.
+/// - `points`: each item contributes weighted by its **point total** —
+///   the right model for syllabi where "Final draft = 1000 pts, reflection
+///   = 400 pts" and a higher total means a bigger slice of the grade.
+enum GradingStyle { percent, points }
+
+extension GradingStyleX on GradingStyle {
+  String get label => switch (this) {
+        GradingStyle.percent => 'Percent (equal weight)',
+        GradingStyle.points => 'Points (totals are weights)',
+      };
+}
+
 class Course {
   const Course({
     required this.id,
@@ -97,14 +114,34 @@ class Course {
     this.cutoffB = 80,
     this.cutoffC = 70,
     this.cutoffD = 60,
+    this.cutoffsArePoints = false,
     this.extraCreditPct = 0,
     this.extraCreditIsPoints = false,
+    this.order = 0,
+    this.gradingStyle = GradingStyle.percent,
   });
 
   final String id;
   final String name;
   final int colorSeed;
   final double targetGrade;
+
+  /// Manual sort position within the Grades page's course grid
+  /// (drag-to-reorder). Legacy courses default to 0 — they're sorted
+  /// alphabetically as a tiebreaker until the user touches them.
+  final int order;
+
+  /// How the course-wide average folds together its items. See
+  /// [GradingStyle] for the trade-off; default is [GradingStyle.percent]
+  /// so legacy data and the existing UI behaviour are preserved.
+  final GradingStyle gradingStyle;
+
+  /// The weight a single graded item carries in the course average,
+  /// chosen by [gradingStyle]: explicit `weight` in percent mode, point
+  /// `total` in points mode. Centralising it here keeps every callsite
+  /// honest about the mode rather than scattering `if-else` branches.
+  double weightOf(GradeEntry g) =>
+      gradingStyle == GradingStyle.points ? g.total : g.weight;
 
   /// The [Institution] this live course belongs to; its grading system
   /// determines how this course's grade is shown. Null only transiently
@@ -128,10 +165,18 @@ class Course {
   final double passCutoff;
 
   /// Letter-band lower bounds (graded mode). F is below [cutoffD].
+  /// Interpreted by [cutoffsArePoints]: percent of course average when
+  /// false (legacy), total earned points when true.
   final double cutoffA;
   final double cutoffB;
   final double cutoffC;
   final double cutoffD;
+
+  /// When true, [passCutoff] / [cutoffA..D] are point thresholds (e.g.
+  /// 1200 pts ≥ A) compared against the course's total earned points
+  /// rather than its weighted percentage. Lets a syllabus that grades
+  /// strictly by cumulative point totals be entered as-is.
+  final bool cutoffsArePoints;
 
   /// Flat extra-credit / curve value added to the final course %
   /// (0 = none). Interpreted as points or a percentage per
@@ -153,6 +198,16 @@ class Course {
     return 'F';
   }
 
+  /// Letter for an earned point total when [cutoffsArePoints] is on.
+  /// Same bands, just compared in raw points instead of percent.
+  String letterForPoints(double pts) {
+    if (pts >= cutoffA) return 'A';
+    if (pts >= cutoffB) return 'B';
+    if (pts >= cutoffC) return 'C';
+    if (pts >= cutoffD) return 'D';
+    return 'F';
+  }
+
   Course copyWith({
     String? name,
     int? colorSeed,
@@ -167,8 +222,11 @@ class Course {
     double? cutoffB,
     double? cutoffC,
     double? cutoffD,
+    bool? cutoffsArePoints,
     double? extraCreditPct,
     bool? extraCreditIsPoints,
+    int? order,
+    GradingStyle? gradingStyle,
   }) =>
       Course(
         id: id,
@@ -185,9 +243,12 @@ class Course {
         cutoffB: cutoffB ?? this.cutoffB,
         cutoffC: cutoffC ?? this.cutoffC,
         cutoffD: cutoffD ?? this.cutoffD,
+        cutoffsArePoints: cutoffsArePoints ?? this.cutoffsArePoints,
         extraCreditPct: extraCreditPct ?? this.extraCreditPct,
         extraCreditIsPoints:
             extraCreditIsPoints ?? this.extraCreditIsPoints,
+        order: order ?? this.order,
+        gradingStyle: gradingStyle ?? this.gradingStyle,
       );
 
   Map<String, dynamic> toJson() => {
@@ -204,8 +265,11 @@ class Course {
         'cutoffB': cutoffB,
         'cutoffC': cutoffC,
         'cutoffD': cutoffD,
+        'cutoffsArePoints': cutoffsArePoints,
         'extraCreditPct': extraCreditPct,
         'extraCreditIsPoints': extraCreditIsPoints,
+        'order': order,
+        'gradingStyle': gradingStyle.index,
       };
 
   factory Course.fromJson(Map json) => Course(
@@ -223,9 +287,13 @@ class Course {
         cutoffB: (json['cutoffB'] as num?)?.toDouble() ?? 80,
         cutoffC: (json['cutoffC'] as num?)?.toDouble() ?? 70,
         cutoffD: (json['cutoffD'] as num?)?.toDouble() ?? 60,
+        cutoffsArePoints: json['cutoffsArePoints'] as bool? ?? false,
         extraCreditPct: (json['extraCreditPct'] as num?)?.toDouble() ?? 0,
         extraCreditIsPoints:
             json['extraCreditIsPoints'] as bool? ?? false,
+        order: (json['order'] as num?)?.toInt() ?? 0,
+        gradingStyle: _enum(GradingStyle.values, json['gradingStyle'],
+            GradingStyle.percent),
       );
 }
 
@@ -237,6 +305,7 @@ class GradeCategory {
     required this.name,
     this.weightPercent = 0,
     this.order = 0,
+    this.assignmentCount,
   });
 
   final String id;
@@ -247,13 +316,31 @@ class GradeCategory {
   /// Manual sort position within its course (drag-to-reorder).
   final int order;
 
-  GradeCategory copyWith({String? name, double? weightPercent, int? order}) =>
+  /// Optional total number of assignments the syllabus says this
+  /// category will end up containing (e.g. 20 homeworks across the
+  /// semester). Combined with the number of graded entries on file,
+  /// it lets the grade-stability tracker bound how much the course
+  /// grade can still move. Null = unspecified.
+  final int? assignmentCount;
+
+  /// Pass `clearAssignmentCount: true` to drop a previously-set count —
+  /// nullable copyWith args can't tell "leave alone" from "set to null".
+  GradeCategory copyWith({
+    String? name,
+    double? weightPercent,
+    int? order,
+    int? assignmentCount,
+    bool clearAssignmentCount = false,
+  }) =>
       GradeCategory(
         id: id,
         courseId: courseId,
         name: name ?? this.name,
         weightPercent: weightPercent ?? this.weightPercent,
         order: order ?? this.order,
+        assignmentCount: clearAssignmentCount
+            ? null
+            : (assignmentCount ?? this.assignmentCount),
       );
 
   Map<String, dynamic> toJson() => {
@@ -262,6 +349,7 @@ class GradeCategory {
         'name': name,
         'weightPercent': weightPercent,
         'order': order,
+        'assignmentCount': assignmentCount,
       };
 
   factory GradeCategory.fromJson(Map json) => GradeCategory(
@@ -270,6 +358,7 @@ class GradeCategory {
         name: json['name'] as String? ?? '',
         weightPercent: (json['weightPercent'] as num?)?.toDouble() ?? 0,
         order: (json['order'] as num?)?.toInt() ?? 0,
+        assignmentCount: (json['assignmentCount'] as num?)?.toInt(),
       );
 }
 
@@ -488,6 +577,8 @@ class TaskItem {
     this.categoryId,
     this.estimatedMinutes = 60,
     this.recurrence = Recurrence.none,
+    this.plannedStart,
+    this.ganttOrder = 0,
   });
 
   final String id;
@@ -518,6 +609,15 @@ class TaskItem {
   /// Repeat cadence. [Recurrence.none] = a one-off task.
   final Recurrence recurrence;
 
+  /// User-set start date for the Gantt bar (drag the bar's left edge to
+  /// adjust). Null falls back to [createdAt], i.e. the bar spans from
+  /// when the task was added to its due date.
+  final DateTime? plannedStart;
+
+  /// Manual sort position in the Gantt's Manual mode. 0 = untouched —
+  /// untouched tasks cluster together and fall back to due-date order.
+  final int ganttOrder;
+
   TaskItem copyWith({
     String? title,
     bool? done,
@@ -533,6 +633,9 @@ class TaskItem {
     bool clearCategory = false,
     int? estimatedMinutes,
     Recurrence? recurrence,
+    DateTime? plannedStart,
+    bool clearPlannedStart = false,
+    int? ganttOrder,
   }) =>
       TaskItem(
         id: id,
@@ -548,6 +651,10 @@ class TaskItem {
             clearCategory ? null : (categoryId ?? this.categoryId),
         estimatedMinutes: estimatedMinutes ?? this.estimatedMinutes,
         recurrence: recurrence ?? this.recurrence,
+        plannedStart: clearPlannedStart
+            ? null
+            : (plannedStart ?? this.plannedStart),
+        ganttOrder: ganttOrder ?? this.ganttOrder,
       );
 
   Map<String, dynamic> toJson() => {
@@ -563,6 +670,8 @@ class TaskItem {
         'categoryId': categoryId,
         'estimatedMinutes': estimatedMinutes,
         'recurrence': recurrence.index,
+        'plannedStart': plannedStart?.millisecondsSinceEpoch,
+        'ganttOrder': ganttOrder,
       };
 
   factory TaskItem.fromJson(Map json) => TaskItem(
@@ -582,6 +691,11 @@ class TaskItem {
         estimatedMinutes: (json['estimatedMinutes'] as num?)?.toInt() ?? 60,
         recurrence:
             _enum(Recurrence.values, json['recurrence'], Recurrence.none),
+        plannedStart: json['plannedStart'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(
+                json['plannedStart'] as int),
+        ganttOrder: (json['ganttOrder'] as num?)?.toInt() ?? 0,
       );
 }
 

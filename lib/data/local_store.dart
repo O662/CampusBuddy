@@ -117,6 +117,29 @@ class LocalStore {
   Future<void> writeTodoViewMode(String mode) =>
       box(settings).put('todoViewMode', mode);
 
+  String readStudyViewMode() {
+    final raw = box(settings).get('studyViewMode');
+    return raw is String ? raw : 'grid';
+  }
+
+  Future<void> writeStudyViewMode(String mode) =>
+      box(settings).put('studyViewMode', mode);
+
+  /// The user-chosen order for the Grades-page summary strip (GPA chart,
+  /// final-grade calculator, stability tracker). Read as a list of
+  /// short-string keys; caller is responsible for sanitising unknown
+  /// entries and appending any keys that are new since last write.
+  List<String> readGradesWidgetOrder() {
+    final raw = box(settings).get('gradesWidgetOrder');
+    if (raw is List) {
+      return [for (final v in raw) if (v is String) v];
+    }
+    return const [];
+  }
+
+  Future<void> writeGradesWidgetOrder(List<String> order) =>
+      box(settings).put('gradesWidgetOrder', order);
+
   /// Populate a friendly starter dataset the first time the app runs so the
   /// dashboard, planner and study pages have something to show.
   Future<void> _seedIfFirstRun() async {

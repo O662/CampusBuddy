@@ -61,7 +61,20 @@ class CourseDetailPage extends ConsumerWidget {
     ]..sort((a, b) => b.date.compareTo(a.date));
 
     final pct = courseWeightedPercent(course, allCats, entries);
-    final result = courseResult(course, inst, pct);
+    final earnedPoints = courseEarnedPoints(course, entries);
+    final result =
+        courseResult(course, inst, pct, earnedPoints: earnedPoints);
+    // Mirror the Grades page card: when the institution scores in GPA
+    // points the per-grade value (e.g. "4.0") just echoes what the %
+    // already says — show the course's credit hours instead.
+    final hrs = course.creditHours;
+    final hrsLabel =
+        '${hrs.toStringAsFixed(hrs == hrs.roundToDouble() ? 0 : 1)} hrs';
+    final showsGpaPoints =
+        course.gradingMode == CourseGradingMode.graded &&
+            (inst?.gradeSystem ?? GradeSystem.percent) ==
+                GradeSystem.points;
+    final secondary = showsGpaPoints ? hrsLabel : result;
 
     // Running grade history: cumulative weighted % of graded, non-extra
     // items in date order — a calm trend that leads into today's grade.
@@ -73,8 +86,12 @@ class CourseDetailPage extends ConsumerWidget {
       ]..sort((a, b) => a.date.compareTo(b.date));
       var w = 0.0, wp = 0.0;
       for (final g in chron) {
-        w += g.weight;
-        wp += g.effectivePercent! * g.weight;
+        // Honour the course's grading style so the trend matches the
+        // headline average — explicit weights in percent mode, point
+        // totals in points mode.
+        final iw = course.weightOf(g);
+        w += iw;
+        wp += g.effectivePercent! * iw;
         if (w > 0) history.add(wp / w);
       }
     }
@@ -136,9 +153,9 @@ class CourseDetailPage extends ConsumerWidget {
                                 fontSize: 32,
                                 fontWeight: FontWeight.w800,
                                 color: course.color)),
-                        if (result != bigText) ...[
+                        if (secondary != bigText) ...[
                           const SizedBox(height: 2),
-                          Text(result,
+                          Text(secondary,
                               style: const TextStyle(
                                   fontSize: 15,
                                   fontWeight: FontWeight.w600,
@@ -305,6 +322,7 @@ class _CriteriaCard extends ConsumerStatefulWidget {
 
 class _CriteriaCardState extends ConsumerState<_CriteriaCard> {
   late CourseGradingMode _mode;
+  late bool _byPoints;
   late final TextEditingController _pass;
   late final TextEditingController _a;
   late final TextEditingController _b;
@@ -316,13 +334,16 @@ class _CriteriaCardState extends ConsumerState<_CriteriaCard> {
     super.initState();
     final c = widget.course;
     _mode = c.gradingMode;
-    String n(double v) => v.toStringAsFixed(v == v.roundToDouble() ? 0 : 1);
-    _pass = TextEditingController(text: n(c.passCutoff));
-    _a = TextEditingController(text: n(c.cutoffA));
-    _b = TextEditingController(text: n(c.cutoffB));
-    _c = TextEditingController(text: n(c.cutoffC));
-    _d = TextEditingController(text: n(c.cutoffD));
+    _byPoints = c.cutoffsArePoints;
+    _pass = TextEditingController(text: _fmt(c.passCutoff));
+    _a = TextEditingController(text: _fmt(c.cutoffA));
+    _b = TextEditingController(text: _fmt(c.cutoffB));
+    _c = TextEditingController(text: _fmt(c.cutoffC));
+    _d = TextEditingController(text: _fmt(c.cutoffD));
   }
+
+  static String _fmt(double v) =>
+      v.toStringAsFixed(v == v.roundToDouble() ? 0 : 1);
 
   @override
   void dispose() {
@@ -335,15 +356,21 @@ class _CriteriaCardState extends ConsumerState<_CriteriaCard> {
   double _num(TextEditingController t, double fallback) =>
       double.tryParse(t.text.trim()) ?? fallback;
 
+  /// Cap: 100 for percent cutoffs, a generous 1,000,000 for points so a
+  /// huge-total syllabus (e.g. 5000 pts) isn't artificially clamped.
+  double _bound(double v) =>
+      v.clamp(0, _byPoints ? 1000000 : 100).toDouble();
+
   void _persist() {
     final c = widget.course;
     ref.read(coursesProvider.notifier).upsert(c.copyWith(
           gradingMode: _mode,
-          passCutoff: _num(_pass, c.passCutoff).clamp(0, 100),
-          cutoffA: _num(_a, c.cutoffA).clamp(0, 100),
-          cutoffB: _num(_b, c.cutoffB).clamp(0, 100),
-          cutoffC: _num(_c, c.cutoffC).clamp(0, 100),
-          cutoffD: _num(_d, c.cutoffD).clamp(0, 100),
+          cutoffsArePoints: _byPoints,
+          passCutoff: _bound(_num(_pass, c.passCutoff)),
+          cutoffA: _bound(_num(_a, c.cutoffA)),
+          cutoffB: _bound(_num(_b, c.cutoffB)),
+          cutoffC: _bound(_num(_c, c.cutoffC)),
+          cutoffD: _bound(_num(_d, c.cutoffD)),
         ));
   }
 
@@ -365,7 +392,10 @@ class _CriteriaCardState extends ConsumerState<_CriteriaCard> {
                 controller: c,
                 keyboardType: TextInputType.number,
                 onSubmitted: (_) => _persist(),
-                decoration: const InputDecoration(isDense: true),
+                decoration: InputDecoration(
+                  isDense: true,
+                  suffixText: _byPoints ? 'pts' : '%',
+                ),
               ),
             ),
           ],
@@ -375,6 +405,7 @@ class _CriteriaCardState extends ConsumerState<_CriteriaCard> {
   @override
   Widget build(BuildContext context) {
     final graded = _mode == CourseGradingMode.graded;
+    final unit = _byPoints ? 'pts' : '%';
     return GlassCard(
       title: 'Grading criteria',
       icon: Icons.rule_rounded,
@@ -395,10 +426,40 @@ class _CriteriaCardState extends ConsumerState<_CriteriaCard> {
               _persist();
             }),
           ),
+          const SizedBox(height: 12),
+          // Percent vs points cutoff style — the values stay in their
+          // controllers so the user can review/edit them after switching.
+          Row(
+            children: [
+              const Text('Cutoffs in',
+                  style: TextStyle(
+                      fontSize: 12, color: AppPalette.textSecondary)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: DropdownButtonFormField<bool>(
+                  initialValue: _byPoints,
+                  isExpanded: true,
+                  dropdownColor: const Color(0xFF241F45),
+                  decoration: const InputDecoration(isDense: true),
+                  items: const [
+                    DropdownMenuItem(
+                        value: false, child: Text('Percent (e.g. 90%)')),
+                    DropdownMenuItem(
+                        value: true,
+                        child: Text('Points (e.g. 1200 pts)')),
+                  ],
+                  onChanged: (v) => setState(() {
+                    _byPoints = v ?? _byPoints;
+                    _persist();
+                  }),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 14),
           if (graded) ...[
-            const Text('Letter cutoffs (minimum %)',
-                style: TextStyle(
+            Text('Letter cutoffs (minimum $unit)',
+                style: const TextStyle(
                     fontSize: 12, color: AppPalette.textSecondary)),
             const SizedBox(height: 8),
             Row(
@@ -425,13 +486,22 @@ class _CriteriaCardState extends ConsumerState<_CriteriaCard> {
               style: const TextStyle(
                   fontSize: 11, color: AppPalette.textFaint),
             ),
+            if (_byPoints) ...[
+              const SizedBox(height: 4),
+              const Text(
+                'Letter is decided by total earned points across this '
+                'class, not the running %.',
+                style: TextStyle(
+                    fontSize: 11, color: AppPalette.textFaint),
+              ),
+            ],
           ] else
             Row(
               children: [
                 _numField(
                     _mode == CourseGradingMode.passFail
-                        ? 'Pass at ≥ %'
-                        : 'Satisfactory at ≥ %',
+                        ? 'Pass at ≥ $unit'
+                        : 'Satisfactory at ≥ $unit',
                     _pass),
                 const SizedBox(width: 8),
                 const Expanded(child: SizedBox()),
@@ -863,6 +933,20 @@ class _AssignmentsCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // Group by category id; null + unknown ids fall into "Uncategorized".
     final catIds = {for (final c in categories) c.id};
+    // Implicit Uncategorized weight = whatever's left after the user's
+    // named categories. Show the bucket whenever there's a meaningful
+    // slice still uncovered, or whenever stray items exist — so the
+    // section never silently swallows real assignments.
+    final categoryWeightTotal =
+        categories.fold<double>(0, (s, c) => s + c.weightPercent);
+    final uncategorizedWeight =
+        (100 - categoryWeightTotal).clamp(0, 100);
+    // Per-entry chips display the item's own % (0–100), so the green/
+    // amber threshold needs to be in percent too. In points-mode
+    // courses `cutoffC` holds a point total (e.g. 700 pts) and would
+    // make every chip read amber — fall back to a fixed 70 % so the
+    // chip stays a meaningful per-assignment pass hint.
+    final perEntryPassPct = course.cutoffsArePoints ? 70.0 : course.cutoffC;
     Widget row(GradeEntry g) {
       // The % that counts: raw score plus this item's own extra credit.
       final pct = g.effectivePercent;
@@ -912,7 +996,7 @@ class _AssignmentsCard extends ConsumerWidget {
                       pct == null ? '—' : '${pct.toStringAsFixed(0)}%',
                   color: pct == null
                       ? AppPalette.textFaint
-                      : (pct >= course.cutoffC
+                      : (pct >= perEntryPassPct
                           ? AppPalette.success
                           : AppPalette.warning),
                 ),
@@ -974,8 +1058,14 @@ class _AssignmentsCard extends ConsumerWidget {
                         .where((g) => g.categoryId == c.id)
                         .toList(),
                   ),
+                // Label the section with the implicit leftover weight
+                // so its share is visible at a glance. `section()` hides
+                // itself when there are no items, so a category set that
+                // covers everything (no stray uncategorized assignments)
+                // produces nothing here regardless of the percent.
                 section(
-                  'Uncategorized',
+                  'Uncategorized · '
+                  '${uncategorizedWeight.toStringAsFixed(0)}%',
                   entries
                       .where((g) =>
                           g.categoryId == null ||

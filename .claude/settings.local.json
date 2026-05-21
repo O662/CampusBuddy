@@ -28,7 +28,9 @@
       "Bash(curl -s \"https://pub.dev/api/packages/file_selector\")",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d['latest']['version']\\)\")",
       "PowerShell(dart run *)",
-      "PowerShell(flutter pub *)"
+      "PowerShell(flutter pub *)",
+      "Bash(powershell -NoProfile -Command \"\\(Get-Content lib\\\\features\\\\study\\\\study_page.dart | Measure-Object -Line\\).Lines\")",
+      "Bash(powershell -NoProfile -Command \"\\(Get-Content lib\\\\features\\\\grades\\\\grades_page.dart | Measure-Object -Line\\).Lines\")"
     ],
     "additionalDirectories": [
       "c:\\Users\\Build\\.claude\\projects\\c--Users-Build-OneDrive-Documents-GitHub-CampusBuddy\\memory"
