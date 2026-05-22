@@ -21,9 +21,15 @@ extension PriorityX on Priority {
       };
 }
 
-/// How often a [TaskItem] repeats. When a repeating task is completed, the
-/// next occurrence is spawned automatically (see `TaskNotifier.save`).
-enum Recurrence { none, daily, weekly, biweekly, monthly }
+/// How often a [TaskItem] or [EventItem] repeats. When a repeating task
+/// is completed, the next occurrence is spawned automatically (see
+/// `TaskNotifier.save`). For events, [EventItem.expandOccurrences] walks
+/// the cadence forward across the visible window.
+///
+/// [custom] is an events-only cadence — a recurring set of weekdays
+/// (e.g. Mon / Wed / Fri). Tasks ignore it; their dropdown filters it out
+/// so the option only surfaces where it's actually supported.
+enum Recurrence { none, daily, weekly, biweekly, monthly, custom }
 
 extension RecurrenceX on Recurrence {
   String get label => switch (this) {
@@ -32,13 +38,16 @@ extension RecurrenceX on Recurrence {
         Recurrence.weekly => 'Weekly',
         Recurrence.biweekly => 'Every 2 weeks',
         Recurrence.monthly => 'Monthly',
+        Recurrence.custom => 'Custom days',
       };
 
   bool get repeats => this != Recurrence.none;
 
   /// The next due date after [from] for this cadence (preserves time of
   /// day). Monthly rolls the month over; a short month just clamps via
-  /// Dart's DateTime normalization.
+  /// Dart's DateTime normalization. [custom] is event-only and returns
+  /// [from] unchanged here — the event expansion path handles its real
+  /// cadence using the per-event day list.
   DateTime next(DateTime from) => switch (this) {
         Recurrence.none => from,
         Recurrence.daily => from.add(const Duration(days: 1)),
@@ -46,6 +55,7 @@ extension RecurrenceX on Recurrence {
         Recurrence.biweekly => from.add(const Duration(days: 14)),
         Recurrence.monthly => DateTime(
             from.year, from.month + 1, from.day, from.hour, from.minute),
+        Recurrence.custom => from,
       };
 }
 
@@ -579,6 +589,7 @@ class TaskItem {
     this.recurrence = Recurrence.none,
     this.plannedStart,
     this.ganttOrder = 0,
+    this.completionPercent = 0,
   });
 
   final String id;
@@ -618,6 +629,11 @@ class TaskItem {
   /// untouched tasks cluster together and fall back to due-date order.
   final int ganttOrder;
 
+  /// User-reported progress on the task, 0..100. Shown as a fill inside
+  /// the Gantt bar so partly-done work is visible at a glance without
+  /// having to mark the whole task complete.
+  final int completionPercent;
+
   TaskItem copyWith({
     String? title,
     bool? done,
@@ -636,6 +652,7 @@ class TaskItem {
     DateTime? plannedStart,
     bool clearPlannedStart = false,
     int? ganttOrder,
+    int? completionPercent,
   }) =>
       TaskItem(
         id: id,
@@ -655,6 +672,7 @@ class TaskItem {
             ? null
             : (plannedStart ?? this.plannedStart),
         ganttOrder: ganttOrder ?? this.ganttOrder,
+        completionPercent: completionPercent ?? this.completionPercent,
       );
 
   Map<String, dynamic> toJson() => {
@@ -672,6 +690,7 @@ class TaskItem {
         'recurrence': recurrence.index,
         'plannedStart': plannedStart?.millisecondsSinceEpoch,
         'ganttOrder': ganttOrder,
+        'completionPercent': completionPercent,
       };
 
   factory TaskItem.fromJson(Map json) => TaskItem(
@@ -696,6 +715,9 @@ class TaskItem {
             : DateTime.fromMillisecondsSinceEpoch(
                 json['plannedStart'] as int),
         ganttOrder: (json['ganttOrder'] as num?)?.toInt() ?? 0,
+        completionPercent:
+            ((json['completionPercent'] as num?)?.toInt() ?? 0)
+                .clamp(0, 100),
       );
 }
 
@@ -775,6 +797,9 @@ class EventItem {
     required this.start,
     this.type = EventType.personal,
     this.location = '',
+    this.recurrence = Recurrence.none,
+    this.recurrenceEnd,
+    this.recurrenceDays = const [],
   });
 
   final String id;
@@ -783,11 +808,32 @@ class EventItem {
   final EventType type;
   final String location;
 
+  /// Repeat cadence. [Recurrence.none] = a one-off event (existing
+  /// behaviour). Anything else makes the event appear on every matching
+  /// day from [start] up to (and including) [recurrenceEnd], or one year
+  /// out if no end is set — see `expandOccurrences`.
+  final Recurrence recurrence;
+
+  /// Optional last day the series runs (inclusive). Null = open-ended;
+  /// the calendar still caps the visible occurrences to a year from
+  /// today so a daily class doesn't generate decades of entries.
+  final DateTime? recurrenceEnd;
+
+  /// Days of the week the series fires on, used only when [recurrence]
+  /// is [Recurrence.custom]. Stored as ISO weekday numbers (1 = Mon …
+  /// 7 = Sun, matching `DateTime.weekday`). An empty list makes a custom
+  /// recurrence behave like none.
+  final List<int> recurrenceDays;
+
   EventItem copyWith({
     String? title,
     DateTime? start,
     EventType? type,
     String? location,
+    Recurrence? recurrence,
+    DateTime? recurrenceEnd,
+    bool clearRecurrenceEnd = false,
+    List<int>? recurrenceDays,
   }) =>
       EventItem(
         id: id,
@@ -795,7 +841,61 @@ class EventItem {
         start: start ?? this.start,
         type: type ?? this.type,
         location: location ?? this.location,
+        recurrence: recurrence ?? this.recurrence,
+        recurrenceEnd: clearRecurrenceEnd
+            ? null
+            : (recurrenceEnd ?? this.recurrenceEnd),
+        recurrenceDays: recurrenceDays ?? this.recurrenceDays,
       );
+
+  /// Every occurrence of this event whose start is between [from] and
+  /// [to] inclusive. For one-off events that's just `[start]` when the
+  /// single date falls in the window. For recurring events the cadence
+  /// walks forward from [start] (so past occurrences are emitted too),
+  /// stopping at the series end or 365 days past [to] — whichever is
+  /// earlier — so the loop is always bounded.
+  List<DateTime> expandOccurrences(DateTime from, DateTime to) {
+    if (!recurrence.repeats) {
+      return start.isAfter(to) || start.isBefore(from) ? const [] : [start];
+    }
+    final hardCap = to.add(const Duration(days: 365));
+    final end = recurrenceEnd != null && recurrenceEnd!.isBefore(hardCap)
+        ? recurrenceEnd!
+        : hardCap;
+
+    // Custom cadence: walk one day at a time and emit on selected
+    // weekdays. Falls back to "no recurrence" when the day list is
+    // empty (the dialog blocks saving an empty set, but old data could
+    // still hit this path).
+    if (recurrence == Recurrence.custom) {
+      if (recurrenceDays.isEmpty) {
+        return start.isAfter(to) || start.isBefore(from)
+            ? const []
+            : [start];
+      }
+      final daysSet = recurrenceDays.toSet();
+      final out = <DateTime>[];
+      var cur = start;
+      for (var i = 0; i < 4000 && !cur.isAfter(end); i++) {
+        if (daysSet.contains(cur.weekday) && !cur.isBefore(from)) {
+          out.add(cur);
+        }
+        cur = cur.add(const Duration(days: 1));
+      }
+      return out;
+    }
+
+    final out = <DateTime>[];
+    var cur = start;
+    // Walk forward up to a generous bound. The 4000-iteration guard
+    // catches a malformed cadence (e.g. monthly from Feb 29) so we never
+    // spin forever even if `next` drifts in an unexpected direction.
+    for (var i = 0; i < 4000 && !cur.isAfter(end); i++) {
+      if (!cur.isBefore(from)) out.add(cur);
+      cur = recurrence.next(cur);
+    }
+    return out;
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -803,6 +903,9 @@ class EventItem {
         'start': start.millisecondsSinceEpoch,
         'type': type.index,
         'location': location,
+        'recurrence': recurrence.index,
+        'recurrenceEnd': recurrenceEnd?.millisecondsSinceEpoch,
+        'recurrenceDays': recurrenceDays,
       };
 
   factory EventItem.fromJson(Map json) => EventItem(
@@ -811,6 +914,16 @@ class EventItem {
         start: DateTime.fromMillisecondsSinceEpoch(json['start'] as int),
         type: _enum(EventType.values, json['type'], EventType.personal),
         location: json['location'] as String? ?? '',
+        recurrence:
+            _enum(Recurrence.values, json['recurrence'], Recurrence.none),
+        recurrenceEnd: json['recurrenceEnd'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(
+                json['recurrenceEnd'] as int),
+        recurrenceDays: [
+          for (final v in (json['recurrenceDays'] as List? ?? const []))
+            if (v is num) v.toInt(),
+        ],
       );
 }
 

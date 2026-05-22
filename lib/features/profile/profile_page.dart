@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/theme/app_palette.dart';
+import '../../core/widgets/brand_logo.dart';
 import '../../core/widgets/entry_dialogs.dart';
 import '../../core/widgets/glass.dart';
 import '../../core/widgets/ui_kit.dart';
@@ -114,11 +115,21 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
           GlassCard(
             title: 'About CampusBuddy',
             icon: Icons.info_outline_rounded,
-            child: const Text(
-              'CampusBuddy keeps your coursework, planner and study tools in '
-              'one calm place. All data is stored locally on this device.\n\n'
-              'Version 1.0.0',
-              style: TextStyle(color: AppPalette.textSecondary, height: 1.5),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const BrandLogo(size: 72, borderRadius: 18),
+                const SizedBox(width: 16),
+                const Expanded(
+                  child: Text(
+                    'CampusBuddy keeps your coursework, planner and study '
+                    'tools in one calm place. All data is stored locally on '
+                    'this device.\n\nVersion 1.0.0',
+                    style: TextStyle(
+                        color: AppPalette.textSecondary, height: 1.5),
+                  ),
+                ),
+              ],
             ),
           ),
         ],

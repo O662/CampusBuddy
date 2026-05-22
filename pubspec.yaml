@@ -64,6 +64,29 @@ dev_dependencies:
   flutter_lints: ^6.0.0
   hive_ce_generator: ^1.10.0
   build_runner: ^2.15.0
+  # Regenerates per-platform launcher icons (Windows .ico, Android mipmaps,
+  # iOS asset catalog, web favicons, macOS .icns) from the brand PNG below.
+  # Run with: dart run flutter_launcher_icons
+  flutter_launcher_icons: ^0.14.4
+
+# Drives `dart run flutter_launcher_icons`. The source PNG already embeds
+# the violet→green brand gradient, so the same image works for every
+# platform without a separate adaptive-icon foreground.
+flutter_launcher_icons:
+  image_path: "assets/Images/logo/CampusBuddy Logo.png"
+  android: "launcher_icon"
+  # iOS / macOS bundles aren't checked into this repo (Windows is the
+  # primary target), so we don't ask the generator to touch them.
+  ios: false
+  web:
+    generate: true
+    image_path: "assets/Images/logo/CampusBuddy Logo.png"
+    background_color: "#7C6FE3"
+    theme_color: "#7C6FE3"
+  windows:
+    generate: true
+    image_path: "assets/Images/logo/CampusBuddy Logo.png"
+    icon_size: 256
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -78,6 +101,7 @@ flutter:
 
   assets:
     - assets/sounds/alarm.wav
+    - assets/Images/logo/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

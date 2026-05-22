@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../core/theme/app_palette.dart';
 import '../core/widgets/adaptive_draggable.dart';
 import '../core/widgets/animated_gradient_background.dart';
+import '../core/widgets/brand_logo.dart';
 import '../core/widgets/glass.dart';
 import 'nav.dart';
 import 'nav_state.dart';
@@ -82,20 +83,7 @@ class _LeftRail extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Center(
-            child: Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [AppPalette.periwinkle, AppPalette.mint],
-                ),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: const Icon(Icons.school_rounded,
-                  color: Color(0xFF15132B), size: 24),
-            ),
-          ),
+          const Center(child: BrandLogo(size: 44, borderRadius: 14)),
           if (!compact) ...[
             const SizedBox(height: 10),
             const Text('CampusBuddy',

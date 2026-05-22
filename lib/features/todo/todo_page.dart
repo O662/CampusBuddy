@@ -78,9 +78,13 @@ class _TodoPageState extends ConsumerState<TodoPage> {
     final coursesById = ref.watch(coursesByIdProvider);
     final gradeCategories = ref.watch(gradeCategoriesProvider);
     final viewMode = ref.watch(todoViewModeProvider);
+    final hideDone = ref.watch(hideCompletedTasksProvider);
 
     final open = tasks.where((t) => !t.done).toList();
-    final done = tasks.where((t) => t.done).toList();
+    // When the global hide-completed switch is on, drop finished tasks
+    // entirely — the Completed pane and sidebar row go with them.
+    final done =
+        hideDone ? const <TaskItem>[] : tasks.where((t) => t.done).toList();
 
     int cmp(TaskItem a, TaskItem b) {
       final byPriority = b.priority.index.compareTo(a.priority.index);
@@ -328,9 +332,10 @@ class _TodoPageState extends ConsumerState<TodoPage> {
       );
     }
 
+    final doneTotal = tasks.where((t) => t.done).length;
     return PageBody(
       title: 'To-do',
-      subtitle: '${open.length} open · ${done.length} done · '
+      subtitle: '${open.length} open · $doneTotal done · '
           '${folders.length} folder${folders.length == 1 ? '' : 's'}',
       actions: [
         _TodoViewToggle(
@@ -346,6 +351,12 @@ class _TodoPageState extends ConsumerState<TodoPage> {
         const SizedBox(width: 8),
         SoftButton(
             label: 'New task', filled: true, onTap: () => newTask()),
+        const SizedBox(width: 4),
+        _TodoOverflowMenu(
+          hideDone: hideDone,
+          onToggleHideDone: () =>
+              ref.read(hideCompletedTasksProvider.notifier).toggle(),
+        ),
       ],
       child: body(),
     );
@@ -391,6 +402,39 @@ class _CompletedGroup extends StatelessWidget {
             for (final t in tasks) rowBuilder(t),
         ],
       ),
+    );
+  }
+}
+
+/// 3-dot overflow menu shown to the right of "New task" on the To-do
+/// header. Currently holds the hide-completed switch; placeholder home
+/// for any other page-wide preferences that don't warrant their own pill.
+class _TodoOverflowMenu extends StatelessWidget {
+  const _TodoOverflowMenu({
+    required this.hideDone,
+    required this.onToggleHideDone,
+  });
+
+  final bool hideDone;
+  final VoidCallback onToggleHideDone;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      tooltip: 'More options',
+      icon: const Icon(Icons.more_vert_rounded,
+          size: 20, color: AppPalette.textSecondary),
+      color: const Color(0xFF241F45),
+      onSelected: (key) {
+        if (key == 'hide-done') onToggleHideDone();
+      },
+      itemBuilder: (_) => [
+        CheckedPopupMenuItem(
+          value: 'hide-done',
+          checked: hideDone,
+          child: const Text('Hide completed tasks'),
+        ),
+      ],
     );
   }
 }
@@ -957,7 +1001,7 @@ class _TaskRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final meta = <String>[
-      if (task.due != null) 'Due ${relativeDay(task.due!)}',
+      if (task.due != null) formatTaskDue(task.due!, context),
       if (task.isAssignment) course?.name ?? 'Assignment',
     ].join(' · ');
 

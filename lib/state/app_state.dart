@@ -529,6 +529,26 @@ final studyViewModeProvider =
     NotifierProvider<StudyViewModeNotifier, StudyViewMode>(
         StudyViewModeNotifier.new);
 
+/// Persisted "hide completed tasks" switch. One global flag honored by the
+/// To-do board, the Planner's month-view agenda, and the Gantt — flipping
+/// it in any one of those places hides finished work everywhere.
+class HideCompletedTasksNotifier extends Notifier<bool> {
+  @override
+  bool build() => ref.read(localStoreProvider).readHideCompletedTasks();
+
+  Future<void> set(bool value) async {
+    if (state == value) return;
+    await ref.read(localStoreProvider).writeHideCompletedTasks(value);
+    state = value;
+  }
+
+  Future<void> toggle() => set(!state);
+}
+
+final hideCompletedTasksProvider =
+    NotifierProvider<HideCompletedTasksNotifier, bool>(
+        HideCompletedTasksNotifier.new);
+
 /// String keys identifying the three cards in the Grades-page summary
 /// strip. Kept as a const list (not an enum) so persistence is simple
 /// and adding/removing a card later is just a list edit.

@@ -267,12 +267,18 @@ class SoftButton extends StatelessWidget {
     required this.onTap,
     this.icon = Icons.add_rounded,
     this.filled = false,
+    this.tall = false,
   });
 
   final String label;
   final VoidCallback onTap;
   final IconData icon;
   final bool filled;
+
+  /// When true the button uses a roomier vertical padding so it lines up
+  /// with the planner's pill-style toggles (Week/Agenda/Month/Gantt etc.).
+  /// Left off by default so existing buttons elsewhere keep their height.
+  final bool tall;
 
   @override
   Widget build(BuildContext context) {
@@ -282,8 +288,8 @@ class SoftButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(999),
         onTap: onTap,
         child: Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          padding: EdgeInsets.symmetric(
+              horizontal: 14, vertical: tall ? 12 : 9),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(999),
             color: filled
@@ -314,6 +320,26 @@ class SoftButton extends StatelessWidget {
       ),
     );
   }
+}
+
+/// True when [d]'s time component is something the user explicitly set,
+/// as opposed to the 23:59 "end of day" sentinel new task picks default
+/// to. Centralised so display code stays in sync with the dialog's idea
+/// of what counts as a real time.
+bool hasExplicitDueTime(DateTime d) => !(d.hour == 23 && d.minute == 59);
+
+/// Format a task's due field for a row label: "Due Tomorrow" by default,
+/// "Due Tomorrow · 9:00 AM" once the user has set a specific time. Pass
+/// [context] only if you want localized time formatting; without it the
+/// time falls back to a 24-hour `HH:mm` rendering.
+String formatTaskDue(DateTime due, [BuildContext? context]) {
+  final day = relativeDay(due);
+  if (!hasExplicitDueTime(due)) return 'Due $day';
+  final time = context != null
+      ? TimeOfDay.fromDateTime(due).format(context)
+      : '${due.hour.toString().padLeft(2, '0')}:'
+          '${due.minute.toString().padLeft(2, '0')}';
+  return 'Due $day · $time';
 }
 
 String relativeDay(DateTime date) {

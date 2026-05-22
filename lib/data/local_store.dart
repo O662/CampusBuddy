@@ -125,6 +125,17 @@ class LocalStore {
   Future<void> writeStudyViewMode(String mode) =>
       box(settings).put('studyViewMode', mode);
 
+  /// Global "hide completed tasks" toggle, honored by the To-do board, the
+  /// Planner's month-view day agenda, and the Gantt's row list. Defaults to
+  /// false so legacy users see no behavior change until they flip it.
+  bool readHideCompletedTasks() {
+    final raw = box(settings).get('hideCompletedTasks');
+    return raw is bool ? raw : false;
+  }
+
+  Future<void> writeHideCompletedTasks(bool value) =>
+      box(settings).put('hideCompletedTasks', value);
+
   /// The user-chosen order for the Grades-page summary strip (GPA chart,
   /// final-grade calculator, stability tracker). Read as a list of
   /// short-string keys; caller is responsible for sanitising unknown

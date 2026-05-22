@@ -454,8 +454,13 @@ Future<TaskItem?> showTaskDialog(
                 prefixIcon: Icon(Icons.refresh_rounded, size: 18),
               ),
               items: [
+                // Custom (multi-day) recurrence only makes sense for
+                // events, where each occurrence carries its own time.
+                // A task's next-on-completion model can't express it,
+                // so omit the option here rather than show + ignore it.
                 for (final r in Recurrence.values)
-                  DropdownMenuItem(value: r, child: Text(r.label)),
+                  if (r != Recurrence.custom)
+                    DropdownMenuItem(value: r, child: Text(r.label)),
               ],
               onChanged: (v) =>
                   setState(() => recurrence = v ?? recurrence),
@@ -561,6 +566,86 @@ class _FieldLabel extends StatelessWidget {
           fontWeight: FontWeight.w700,
           letterSpacing: 0.5,
           color: AppPalette.textSecondary,
+        ),
+      ),
+    );
+  }
+}
+
+/// Seven small toggle pills (Sun…Sat) for picking the weekdays a custom
+/// recurrence fires on. Days are stored using `DateTime.weekday` values
+/// (1 = Mon … 7 = Sun) so the caller can match against the same key the
+/// occurrence-expansion code uses.
+class _WeekdayPicker extends StatelessWidget {
+  const _WeekdayPicker({required this.selected, required this.onChanged});
+
+  /// Currently-on weekdays (1..7).
+  final Set<int> selected;
+
+  /// Called when the user toggles [day]: [on] is the new state.
+  final void Function(int day, bool on) onChanged;
+
+  // Display order matches the planner's week grid: Sunday → Saturday.
+  static const _displayOrder = [7, 1, 2, 3, 4, 5, 6];
+  static const _labels = {
+    1: 'Mon', 2: 'Tue', 3: 'Wed', 4: 'Thu',
+    5: 'Fri', 6: 'Sat', 7: 'Sun',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        for (final d in _displayOrder)
+          _DayChip(
+            label: _labels[d]!,
+            selected: selected.contains(d),
+            onTap: () => onChanged(d, !selected.contains(d)),
+          ),
+      ],
+    );
+  }
+}
+
+class _DayChip extends StatelessWidget {
+  const _DayChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final fg =
+        selected ? const Color(0xFF15132B) : AppPalette.textSecondary;
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: selected ? AppPalette.accent : Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(
+            color: selected
+                ? AppPalette.accent
+                : AppPalette.glassStroke,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11.5,
+            fontWeight: FontWeight.w700,
+            color: fg,
+            letterSpacing: 0.3,
+          ),
         ),
       ),
     );
@@ -695,50 +780,177 @@ class _DueDateField extends StatelessWidget {
   final DateTime? due;
   final ValueChanged<DateTime?> onChanged;
 
+  /// The "no specific time" sentinel: 23:59. New picks default to this
+  /// because the academic norm is "anything goes before end of day", but
+  /// the user can override to a real class start time (9:00 AM etc.) via
+  /// the time pill on the right.
+  static const _defaultHour = 23;
+  static const _defaultMinute = 59;
+
+  bool _hasExplicitTime(DateTime d) =>
+      !(d.hour == _defaultHour && d.minute == _defaultMinute);
+
+  Future<void> _pickDay(BuildContext context) async {
+    final picked = await _pickDate(context, due ?? DateTime.now());
+    if (picked == null) return;
+    // Preserve the existing time when changing the date; default to the
+    // end-of-day sentinel for a brand-new pick.
+    final hour = due?.hour ?? _defaultHour;
+    final minute = due?.minute ?? _defaultMinute;
+    onChanged(DateTime(picked.year, picked.month, picked.day, hour, minute));
+  }
+
+  Future<void> _pickTime(BuildContext context) async {
+    final base = due ?? DateTime.now();
+    final t = await showTimePicker(
+      context: context,
+      initialTime: _hasExplicitTime(base)
+          ? TimeOfDay.fromDateTime(base)
+          : const TimeOfDay(hour: 9, minute: 0),
+      helpText: 'Set due time',
+    );
+    if (t == null) return;
+    onChanged(DateTime(base.year, base.month, base.day, t.hour, t.minute));
+  }
+
   @override
   Widget build(BuildContext context) {
     final hasDate = due != null;
+    final hasTime = hasDate && _hasExplicitTime(due!);
+    return Row(
+      children: [
+        Expanded(
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => _pickDay(context),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 14, vertical: 13),
+                decoration: BoxDecoration(
+                  color: AppPalette.glassFill,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: AppPalette.glassStroke),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.event_rounded,
+                        size: 18, color: AppPalette.textSecondary),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        hasDate
+                            ? 'Due ${relativeDay(due!)}'
+                            : 'No due date',
+                        style: TextStyle(
+                          color: hasDate
+                              ? AppPalette.textPrimary
+                              : AppPalette.textFaint,
+                        ),
+                      ),
+                    ),
+                    if (hasDate)
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => onChanged(null),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 2),
+                          child: Icon(Icons.close_rounded,
+                              size: 16,
+                              color: AppPalette.textSecondary),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (hasDate) ...[
+          const SizedBox(width: 8),
+          _DueTimeChip(
+            due: due!,
+            hasExplicitTime: hasTime,
+            onPick: () => _pickTime(context),
+            onClear: () {
+              // Drop back to the end-of-day sentinel — keeps the day
+              // anchored but stops claiming a specific time.
+              onChanged(DateTime(due!.year, due!.month, due!.day,
+                  _defaultHour, _defaultMinute));
+            },
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// Trailing time pill next to the due-date field. Shows the picked time
+/// (e.g. "9:00 AM") in accent when set, or a calmer "End of day" hint
+/// when it's still on the default sentinel.
+class _DueTimeChip extends StatelessWidget {
+  const _DueTimeChip({
+    required this.due,
+    required this.hasExplicitTime,
+    required this.onPick,
+    required this.onClear,
+  });
+
+  final DateTime due;
+  final bool hasExplicitTime;
+  final VoidCallback onPick;
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = hasExplicitTime
+        ? TimeOfDay.fromDateTime(due).format(context)
+        : 'End of day';
+    final fg = hasExplicitTime
+        ? AppPalette.lavender
+        : AppPalette.textSecondary;
     return Material(
       color: Colors.transparent,
       child: InkWell(
         borderRadius: BorderRadius.circular(14),
-        onTap: () async {
-          final picked = await _pickDate(context, due ?? DateTime.now());
-          if (picked != null) onChanged(picked);
-        },
+        onTap: onPick,
         child: Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+          padding: const EdgeInsets.symmetric(
+              horizontal: 12, vertical: 13),
           decoration: BoxDecoration(
-            color: AppPalette.glassFill,
+            color: hasExplicitTime
+                ? AppPalette.lavender.withValues(alpha: 0.12)
+                : AppPalette.glassFill,
             borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: AppPalette.glassStroke),
+            border: Border.all(
+              color: hasExplicitTime
+                  ? AppPalette.lavender.withValues(alpha: 0.5)
+                  : AppPalette.glassStroke,
+            ),
           ),
           child: Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.event_rounded,
-                  size: 18, color: AppPalette.textSecondary),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  hasDate ? 'Due ${relativeDay(due!)}' : 'No due date',
-                  style: TextStyle(
-                    color: hasDate
-                        ? AppPalette.textPrimary
-                        : AppPalette.textFaint,
-                  ),
+              Icon(Icons.schedule_rounded, size: 16, color: fg),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  color: fg,
                 ),
               ),
-              if (hasDate)
+              if (hasExplicitTime) ...[
+                const SizedBox(width: 4),
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: () => onChanged(null),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 2),
-                    child: Icon(Icons.close_rounded,
-                        size: 16, color: AppPalette.textSecondary),
-                  ),
+                  onTap: onClear,
+                  child: const Icon(Icons.close_rounded,
+                      size: 14, color: AppPalette.textSecondary),
                 ),
+              ],
             ],
           ),
         ),
@@ -1899,6 +2111,12 @@ Future<EventItem?> showEventDialog(BuildContext context,
           : DateTime(
               initialDate.year, initialDate.month, initialDate.day, 9));
   var type = existing?.type ?? EventType.personal;
+  var recurrence = existing?.recurrence ?? Recurrence.none;
+  var recurrenceEnd = existing?.recurrenceEnd;
+  // Seed the day picker with the event's existing custom days, or — for
+  // a brand-new custom recurrence — the weekday of the chosen start so
+  // the user starts from a sensible "this day every week" default.
+  final customDays = <int>{...?existing?.recurrenceDays};
 
   return showGlassDialog<EventItem>(
     context,
@@ -1956,6 +2174,80 @@ Future<EventItem?> showEventDialog(BuildContext context,
               ),
             ],
           ),
+          const SizedBox(height: 12),
+          DropdownButtonFormField<Recurrence>(
+            initialValue: recurrence,
+            isExpanded: true,
+            dropdownColor: const Color(0xFF241F45),
+            decoration: const InputDecoration(
+              hintText: 'Repeat',
+              prefixIcon: Icon(Icons.refresh_rounded, size: 18),
+            ),
+            items: [
+              for (final r in Recurrence.values)
+                DropdownMenuItem(value: r, child: Text(r.label)),
+            ],
+            onChanged: (v) {
+              setState(() {
+                recurrence = v ?? recurrence;
+                // First time the user flips to "Custom" with no days
+                // chosen, prefill with the start's own weekday so the
+                // chip row isn't empty — they can untick it.
+                if (recurrence == Recurrence.custom && customDays.isEmpty) {
+                  customDays.add(when.weekday);
+                }
+              });
+            },
+          ),
+          if (recurrence == Recurrence.custom) ...[
+            const SizedBox(height: 8),
+            _WeekdayPicker(
+              selected: customDays,
+              onChanged: (day, on) => setState(() {
+                if (on) {
+                  customDays.add(day);
+                } else {
+                  customDays.remove(day);
+                }
+              }),
+            ),
+          ],
+          if (recurrence.repeats) ...[
+            const SizedBox(height: 8),
+            // Optional series end. Helps cap a class to the semester so
+            // it doesn't keep repeating into summer. Left blank, the
+            // calendar still caps occurrences at one year out for sanity.
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () async {
+                      final picked = await _pickDate(
+                        context,
+                        recurrenceEnd ??
+                            when.add(const Duration(days: 90)),
+                      );
+                      if (picked != null) {
+                        setState(() => recurrenceEnd = DateTime(
+                            picked.year, picked.month, picked.day));
+                      }
+                    },
+                    icon: const Icon(Icons.event_busy_rounded, size: 18),
+                    label: Text(recurrenceEnd == null
+                        ? 'Repeats until… (optional)'
+                        : 'Until ${relativeDay(recurrenceEnd!)}'),
+                  ),
+                ),
+                if (recurrenceEnd != null)
+                  IconButton(
+                    tooltip: 'Clear end date',
+                    icon: const Icon(Icons.close_rounded, size: 18),
+                    onPressed: () =>
+                        setState(() => recurrenceEnd = null),
+                  ),
+              ],
+            ),
+          ],
         ],
       ),
     ),
@@ -1966,6 +2258,13 @@ Future<EventItem?> showEventDialog(BuildContext context,
       FilledButton(
         onPressed: () {
           if (titleC.text.trim().isEmpty) return;
+          // Guard against an empty Custom day set — saving with no days
+          // would create a series that never fires. Fall back to none so
+          // the user gets a single occurrence instead of phantom silence.
+          var rec = recurrence;
+          if (rec == Recurrence.custom && customDays.isEmpty) {
+            rec = Recurrence.none;
+          }
           Navigator.pop(
             context,
             EventItem(
@@ -1974,6 +2273,13 @@ Future<EventItem?> showEventDialog(BuildContext context,
               start: when,
               type: type,
               location: locC.text.trim(),
+              recurrence: rec,
+              // Drop a stale end date when recurrence is none — keeps the
+              // stored field honest with how it'll be interpreted later.
+              recurrenceEnd: rec.repeats ? recurrenceEnd : null,
+              recurrenceDays: rec == Recurrence.custom
+                  ? (customDays.toList()..sort())
+                  : const [],
             ),
           );
         },
