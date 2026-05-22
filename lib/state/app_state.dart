@@ -815,6 +815,14 @@ void refreshAfterImport(WidgetRef ref, Iterable<BackupCategory> cats) {
     switch (c) {
       case BackupCategory.profile:
         ref.invalidate(profileProvider);
+        // UI preferences ride along inside the profile section now, so
+        // every notifier that pulls from `LocalStore.readBackupPrefs()`
+        // needs to be rebuilt to pick up the restored value.
+        ref.invalidate(hideCompletedTasksProvider);
+        ref.invalidate(todoViewModeProvider);
+        ref.invalidate(studyViewModeProvider);
+        ref.invalidate(gradesWidgetOrderProvider);
+        ref.invalidate(timerRecentsProvider);
       case BackupCategory.coursesGrades:
         ref.invalidate(coursesProvider);
         ref.invalidate(gradesProvider);

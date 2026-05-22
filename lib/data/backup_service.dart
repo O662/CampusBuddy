@@ -143,13 +143,25 @@ class BackupService {
 
   final LocalStore _store;
 
+  /// Key under which UI preferences ride along inside the profile
+  /// section. Underscore-prefixed so `UserProfile.fromJson` (which only
+  /// reads known names) silently ignores it on legacy import paths.
+  static const String _prefsKey = '_prefs';
+
   /// Builds the pretty-printed JSON backup for [selected].
   String buildJson(Set<BackupCategory> selected) {
     final sections = <String, dynamic>{};
     for (final cat in selected) {
       for (final key in cat.sectionKeys) {
         if (key == BackupCategoryX.profileSection) {
-          sections[key] = _store.readProfile().toJson();
+          // Bundle UI preferences alongside the profile so a restore on a
+          // fresh machine doesn't reset hide-done, view modes, recents,
+          // and the Grades widget order. Empty pref map is omitted to
+          // keep older clients happy.
+          final profileMap = _store.readProfile().toJson();
+          final prefs = _store.readBackupPrefs();
+          if (prefs.isNotEmpty) profileMap[_prefsKey] = prefs;
+          sections[key] = profileMap;
         } else {
           sections[key] = [
             for (final v in _store.box(key).values.whereType<Map>())
@@ -218,6 +230,13 @@ class BackupService {
         if (key == BackupCategoryX.profileSection) {
           if (raw is Map) {
             await _store.writeProfile(UserProfile.fromJson(raw));
+            // Restore UI preferences when the backup carried them.
+            // Older backups (pre-`_prefs`) simply skip this branch.
+            final prefs = raw[_prefsKey];
+            if (prefs is Map) {
+              await _store.writeBackupPrefs(
+                  {for (final e in prefs.entries) e.key.toString(): e.value});
+            }
             applied.add(cat);
           }
           continue;

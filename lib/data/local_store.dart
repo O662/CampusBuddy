@@ -136,6 +136,42 @@ class LocalStore {
   Future<void> writeHideCompletedTasks(bool value) =>
       box(settings).put('hideCompletedTasks', value);
 
+  /// Settings-box keys the backup carries alongside the profile so a
+  /// restore puts UI preferences back where the user left them. Migration
+  /// bookkeeping (`seeded`, `assignmentsMerged`, etc.) is deliberately
+  /// excluded — those belong to the *installation*, not the user.
+  static const List<String> _backupPrefKeys = [
+    'hideCompletedTasks',
+    'todoViewMode',
+    'studyViewMode',
+    'gradesWidgetOrder',
+    'timerRecents',
+  ];
+
+  /// Snapshot of every backup-tracked preference currently in storage.
+  /// Keys absent from the box are omitted (so an old install that never
+  /// touched a setting doesn't write a meaningless default into the
+  /// backup file).
+  Map<String, dynamic> readBackupPrefs() {
+    final s = box(settings);
+    final out = <String, dynamic>{};
+    for (final k in _backupPrefKeys) {
+      final v = s.get(k);
+      if (v != null) out[k] = v;
+    }
+    return out;
+  }
+
+  /// Apply [prefs] (typically the `_prefs` sub-map from a backup) back to
+  /// the settings box. Unknown keys are ignored so a newer backup loaded
+  /// into an older build doesn't litter storage with junk.
+  Future<void> writeBackupPrefs(Map<String, dynamic> prefs) async {
+    final s = box(settings);
+    for (final k in _backupPrefKeys) {
+      if (prefs.containsKey(k)) await s.put(k, prefs[k]);
+    }
+  }
+
   /// The user-chosen order for the Grades-page summary strip (GPA chart,
   /// final-grade calculator, stability tracker). Read as a list of
   /// short-string keys; caller is responsible for sanitising unknown
