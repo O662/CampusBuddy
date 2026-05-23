@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../app/nav_state.dart';
 import '../core/notifications.dart';
 import '../data/backup_service.dart';
 import '../data/local_store.dart';
 import '../data/models.dart';
+import '../features/dashboard/dashboard_state.dart';
 
 /// Bound to the initialized [LocalStore] in `main()` via an override.
 final localStoreProvider = Provider<LocalStore>(
@@ -807,6 +809,39 @@ final backupServiceProvider = Provider<BackupService>(
   (ref) => BackupService(ref.read(localStoreProvider)),
 );
 
+/// Force every user-data and preference provider to re-read storage.
+/// Use after [LocalStore.clearAllData] so the dashboard, planner, grades,
+/// etc. all flip back to the freshly-seeded state without an app restart.
+void refreshAllAfterReset(WidgetRef ref) {
+  // Collections.
+  ref.invalidate(coursesProvider);
+  ref.invalidate(gradesProvider);
+  ref.invalidate(gradeCategoriesProvider);
+  ref.invalidate(foldersProvider);
+  ref.invalidate(tasksProvider);
+  ref.invalidate(blocksProvider);
+  ref.invalidate(eventsProvider);
+  ref.invalidate(decksProvider);
+  ref.invalidate(deckGroupsProvider);
+  ref.invalidate(cardsProvider);
+  ref.invalidate(notesProvider);
+  ref.invalidate(timersProvider);
+  ref.invalidate(pomodorosProvider);
+  ref.invalidate(institutionsProvider);
+  ref.invalidate(semestersProvider);
+  ref.invalidate(pastCoursesProvider);
+  // Profile + preferences + layout.
+  ref.invalidate(profileProvider);
+  ref.invalidate(timerRecentsProvider);
+  ref.invalidate(todoViewModeProvider);
+  ref.invalidate(studyViewModeProvider);
+  ref.invalidate(hideCompletedTasksProvider);
+  ref.invalidate(gradesWidgetOrderProvider);
+  ref.invalidate(dashboardOrderProvider);
+  ref.invalidate(dashboardHiddenProvider);
+  ref.invalidate(navOrderProvider);
+}
+
 /// Rebuilds exactly the collections an import touched. The merge writes
 /// straight to Hive, so the affected notifiers must be invalidated for any
 /// open page to reflect the restored data.
@@ -815,14 +850,18 @@ void refreshAfterImport(WidgetRef ref, Iterable<BackupCategory> cats) {
     switch (c) {
       case BackupCategory.profile:
         ref.invalidate(profileProvider);
-        // UI preferences ride along inside the profile section now, so
-        // every notifier that pulls from `LocalStore.readBackupPrefs()`
-        // needs to be rebuilt to pick up the restored value.
+        // UI preferences and layout ride along inside the profile section
+        // now, so every notifier that pulls from
+        // `LocalStore.readBackupPrefs()` needs to be rebuilt to pick up
+        // the restored value.
         ref.invalidate(hideCompletedTasksProvider);
         ref.invalidate(todoViewModeProvider);
         ref.invalidate(studyViewModeProvider);
         ref.invalidate(gradesWidgetOrderProvider);
         ref.invalidate(timerRecentsProvider);
+        ref.invalidate(dashboardOrderProvider);
+        ref.invalidate(dashboardHiddenProvider);
+        ref.invalidate(navOrderProvider);
       case BackupCategory.coursesGrades:
         ref.invalidate(coursesProvider);
         ref.invalidate(gradesProvider);

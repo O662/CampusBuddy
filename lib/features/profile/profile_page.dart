@@ -112,6 +112,7 @@ class _ProfilePageState extends ConsumerState<ProfilePage> {
           ),
           const _InstitutionsCard(),
           const _BackupCard(),
+          const _ResetCard(),
           GlassCard(
             title: 'About CampusBuddy',
             icon: Icons.info_outline_rounded,
@@ -593,6 +594,235 @@ class _GradeLinkHint extends StatelessWidget {
                   color: AppPalette.textSecondary,
                   fontSize: 12,
                   height: 1.4),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Hard reset entry point on the Profile page. Wipes every Hive box and
+/// re-runs the seed so the app comes back up looking like a brand-new
+/// install. Hidden behind a checkbox-guarded dialog because the action is
+/// irreversible — the standard "Cancel | Delete" pair felt too easy to
+/// click through by accident for something this destructive.
+class _ResetCard extends ConsumerStatefulWidget {
+  const _ResetCard();
+
+  @override
+  ConsumerState<_ResetCard> createState() => _ResetCardState();
+}
+
+class _ResetCardState extends ConsumerState<_ResetCard> {
+  bool _busy = false;
+
+  Future<void> _confirmAndReset() async {
+    if (_busy) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final confirmed = await _showResetDialog(context);
+    if (confirmed != true) return;
+    setState(() => _busy = true);
+    try {
+      await ref.read(localStoreProvider).clearAllData();
+      refreshAllAfterReset(ref);
+      if (!mounted) return;
+      messenger.showSnackBar(const SnackBar(
+        content: Text(
+            'Everything cleared. The sample dataset has been restored.'),
+        duration: Duration(seconds: 4),
+      ));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Reset failed: $e')));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      title: 'Reset CampusBuddy',
+      icon: Icons.restart_alt_rounded,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Wipe every course, grade, task, event, deck, note, timer, '
+            'and preference on this device and start over with the demo '
+            'dataset. Export a backup first if you might want this data '
+            'back later — this can\'t be undone.',
+            style: TextStyle(
+                color: AppPalette.textSecondary, height: 1.5),
+          ),
+          const SizedBox(height: 14),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: AppPalette.danger,
+                foregroundColor: const Color(0xFF15132B),
+              ),
+              onPressed: _busy ? null : _confirmAndReset,
+              icon: const Icon(Icons.delete_forever_rounded, size: 18),
+              label: Text(_busy ? 'Clearing…' : 'Reset everything'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Two-stage confirmation for the destructive reset: a bullet-list of
+/// what's about to vanish, a checkbox the user must tick, and a
+/// destructively-styled "Reset" button that stays disabled until the box
+/// is ticked. Returns true only on a deliberate confirm.
+Future<bool?> _showResetDialog(BuildContext context) {
+  return showGlassDialog<bool>(
+    context,
+    title: 'Reset CampusBuddy?',
+    content: StatefulBuilder(
+      builder: (context, setLocal) {
+        // Local checkbox state — the dialog itself doesn't reach the
+        // outer card's `setState`, so we manage acknowledgement here.
+        return _ResetDialogBody(setLocal: setLocal);
+      },
+    ),
+    actions: (dctx) => [
+      TextButton(
+        onPressed: () => Navigator.pop(dctx, false),
+        child: const Text('Cancel'),
+      ),
+      _ResetConfirmButton(
+        onConfirm: () => Navigator.pop(dctx, true),
+      ),
+    ],
+  );
+}
+
+/// Static bullet list + the acknowledgement checkbox. Splits state out
+/// of the dialog so the actions row can read it from a shared notifier
+/// without rebuilding the whole dialog body.
+class _ResetDialogBody extends StatelessWidget {
+  const _ResetDialogBody({required this.setLocal});
+
+  final StateSetter setLocal;
+
+  static final _ack = ValueNotifier<bool>(false);
+
+  /// Reset the acknowledgement on every open so the previous "yes I'm
+  /// sure" doesn't persist into the next reset attempt.
+  static void resetAcknowledgement() => _ack.value = false;
+
+  @override
+  Widget build(BuildContext context) {
+    // Each dialog open starts with the checkbox unticked.
+    resetAcknowledgement();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'This will permanently delete:',
+          style: TextStyle(
+              color: AppPalette.textPrimary,
+              fontSize: 13,
+              fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 8),
+        const _ResetBullet('All courses, grades, and academic history'),
+        const _ResetBullet('All to-dos, folders, and assignments'),
+        const _ResetBullet('All planner events, blocks, and recurrences'),
+        const _ResetBullet('All flashcards, decks, and study stats'),
+        const _ResetBullet('All notes, timers, and Pomodoros'),
+        const _ResetBullet('Your profile, preferences, and layout'),
+        const SizedBox(height: 12),
+        const Text(
+          'The starter sample dataset will be restored so the app '
+          'isn\'t empty.',
+          style: TextStyle(
+              color: AppPalette.textSecondary, fontSize: 12, height: 1.5),
+        ),
+        const SizedBox(height: 12),
+        ValueListenableBuilder<bool>(
+          valueListenable: _ack,
+          builder: (_, ack, child) => InkWell(
+            borderRadius: BorderRadius.circular(8),
+            onTap: () => _ack.value = !ack,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  Checkbox(
+                    value: ack,
+                    onChanged: (v) => _ack.value = v ?? false,
+                    activeColor: AppPalette.danger,
+                  ),
+                  const Expanded(
+                    child: Text(
+                      'I understand this can\'t be undone.',
+                      style: TextStyle(
+                          color: AppPalette.textPrimary, fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Red "Reset everything" button that stays disabled until the dialog's
+/// acknowledgement checkbox is ticked. Lives in its own widget so it
+/// rebuilds in step with the checkbox without dragging the whole dialog
+/// through a `setState`.
+class _ResetConfirmButton extends StatelessWidget {
+  const _ResetConfirmButton({required this.onConfirm});
+
+  final VoidCallback onConfirm;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _ResetDialogBody._ack,
+      builder: (_, ack, child) => FilledButton(
+        style: FilledButton.styleFrom(
+          backgroundColor: AppPalette.danger,
+          foregroundColor: const Color(0xFF15132B),
+        ),
+        onPressed: ack ? onConfirm : null,
+        child: const Text('Reset everything'),
+      ),
+    );
+  }
+}
+
+class _ResetBullet extends StatelessWidget {
+  const _ResetBullet(this.text);
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 6, right: 8),
+            child: Icon(Icons.circle, size: 5, color: AppPalette.danger),
+          ),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(
+                  color: AppPalette.textSecondary,
+                  fontSize: 12.5,
+                  height: 1.5),
             ),
           ),
         ],

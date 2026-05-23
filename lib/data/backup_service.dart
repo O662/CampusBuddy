@@ -38,7 +38,7 @@ enum BackupCategory {
 
 extension BackupCategoryX on BackupCategory {
   String get label => switch (this) {
-        BackupCategory.profile => 'Profile & preferences',
+        BackupCategory.profile => 'Profile, preferences & layout',
         BackupCategory.coursesGrades => 'Courses & grades',
         BackupCategory.academicHistory => 'Academic history',
         BackupCategory.todos => 'To-dos & folders',

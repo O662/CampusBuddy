@@ -81,6 +81,25 @@ class LocalStore {
 
   Box<dynamic> box(String name) => Hive.box<dynamic>(name);
 
+  /// Wipe every Hive box and (by default) reseed the sample dataset so the
+  /// app comes back up looking like a brand-new install rather than an
+  /// empty void. The legacy `assignments` box is cleared too so the
+  /// one-time merge migration won't pick up stale rows next time.
+  ///
+  /// This is the only path that intentionally drops user data; the
+  /// caller is expected to have already shown a strong confirmation.
+  Future<void> clearAllData({bool reseed = true}) async {
+    for (final name in _boxNames) {
+      await box(name).clear();
+    }
+    if (reseed) {
+      // The seed and migrations are gated on flags inside the settings
+      // box; we just cleared that box, so calling them runs from scratch.
+      await _seedIfFirstRun();
+      await _migrateCoursesToInstitution();
+    }
+  }
+
   UserProfile readProfile() {
     final raw = box(settings).get('profile');
     if (raw is Map) return UserProfile.fromJson(raw);
@@ -137,15 +156,22 @@ class LocalStore {
       box(settings).put('hideCompletedTasks', value);
 
   /// Settings-box keys the backup carries alongside the profile so a
-  /// restore puts UI preferences back where the user left them. Migration
-  /// bookkeeping (`seeded`, `assignmentsMerged`, etc.) is deliberately
-  /// excluded — those belong to the *installation*, not the user.
+  /// restore puts UI preferences and layout back where the user left
+  /// them. Migration bookkeeping (`seeded`, `assignmentsMerged`, etc.)
+  /// is deliberately excluded — those belong to the *installation*, not
+  /// the user. Dashboard + nav order keys are kept on the same list so
+  /// a single "restore profile" step rehydrates the whole layout in one
+  /// shot, matching how the user thinks about "my setup".
   static const List<String> _backupPrefKeys = [
     'hideCompletedTasks',
     'todoViewMode',
     'studyViewMode',
     'gradesWidgetOrder',
     'timerRecents',
+    'dashboardOrder',
+    'dashboardHidden',
+    'navPrimaryOrder',
+    'navSecondaryOrder',
   ];
 
   /// Snapshot of every backup-tracked preference currently in storage.
